@@ -1,0 +1,14 @@
+# Exclude all data files
+*.csv
+*.json
+*.png
+*.pth
+*.html
+
+# Exclude Python backup files
+*~
+
+# Exclude cache and temporary files
+__pycache__/
+*.pyc
+
