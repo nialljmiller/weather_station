@@ -16,6 +16,7 @@ from sklearn.preprocessing import MinMaxScaler
 from numpy.polynomial import Polynomial
 import GPy
 import mimetypes
+from matplotlib.dates import DateFormatter
 
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
@@ -662,6 +663,11 @@ def generate_plots(data, predict_data, output_path, title):
     ax3.ticklabel_format(style="plain", axis="y")
     ax5.ticklabel_format(style="plain", axis="y")
     ax6.ticklabel_format(style="plain", axis="y")
+    ax1.xaxis.set_major_formatter(DateFormatter("%d/%m - %H:%M"))
+    ax2.xaxis.set_major_formatter(DateFormatter("%d/%m - %H:%M"))
+    ax3.xaxis.set_major_formatter(DateFormatter("%d/%m - %H:%M"))
+    ax5.xaxis.set_major_formatter(DateFormatter("%d/%m - %H:%M"))
+    ax6.xaxis.set_major_formatter(DateFormatter("%d/%m - %H:%M"))
     print(f"\tSaved plot to {output_path}.")
 
 
@@ -752,6 +758,9 @@ def calculate_rolling_averages(data, time_spans):
 
 
 def plot_system_metrics(csv_file_path, output_image_path):
+
+
+
     """
     Reads a CSV file containing system metrics, plots the data with dual y-axes, 
     and saves the plot as an image.
@@ -792,6 +801,19 @@ def plot_system_metrics(csv_file_path, output_image_path):
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
 
+
+
+    # Plot CPU usage and temperature
+    ax1.set_xlabel("Timestamp")
+    ax1.xaxis.set_major_formatter(DateFormatter("%H:%M"))
+
+    # Plot GPU temperature
+    ax2.set_xlabel("Timestamp")
+    ax2.xaxis.set_major_formatter(DateFormatter("%H:%M"))
+
+
+
+
     # Format the x-axis
     plt.xticks(rotation=45)
     plt.title("Weather Computer Metrics")
@@ -804,6 +826,10 @@ def plot_system_metrics(csv_file_path, output_image_path):
 
 
 def plot_system_stats(csv_file, output_image="system_stats_plot.png"):
+
+    time_formatter = DateFormatter("%H:%M")
+
+
     # Load data from the CSV file
     df = pd.read_csv(csv_file, parse_dates=["Timestamp"])
     
@@ -825,13 +851,13 @@ def plot_system_stats(csv_file, output_image="system_stats_plot.png"):
     ax1_twin.legend(loc="upper right")
 
     # Plot GPU temperature
-    ax3 = axes[0, 1]
-    ax3.plot(df["Timestamp"], df["CPU Temp (°C)"], label="CPU Temp (°C)", color="green")
-    ax3.set_ylabel("CPU Temp (°C)")
-    ax3.set_xlabel("Timestamp")
-    ax3.set_title("CPU Temperature")
-    ax3.grid()
-    ax3.legend(loc="upper right")
+    ax2 = axes[0, 1]
+    ax2.plot(df["Timestamp"], df["CPU Temp (°C)"], label="CPU Temp (°C)", color="green")
+    ax2.set_ylabel("CPU Temp (°C)")
+    ax2.set_xlabel("Timestamp")
+    ax2.set_title("CPU Temperature")
+    ax2.grid()
+    ax2.legend(loc="upper right")
 
     # Plot GPU usage and memory usage
     ax3 = axes[1, 0]
@@ -890,6 +916,35 @@ def plot_system_stats(csv_file, output_image="system_stats_plot.png"):
     ax6.set_title("Other Temperatures")
     ax6.grid()
     ax6.legend(loc="upper right")
+
+
+
+    # Plot CPU usage and temperature
+    ax1.set_xlabel("Timestamp")
+    ax1.xaxis.set_major_formatter(DateFormatter("%H:%M"))
+
+    # Plot GPU temperature
+    ax3.set_xlabel("Timestamp")
+    ax3.xaxis.set_major_formatter(DateFormatter("%H:%M"))
+
+    # Plot GPU usage and memory usage
+    ax2.set_xlabel("Timestamp")
+    ax2.xaxis.set_major_formatter(DateFormatter("%H:%M"))
+
+    # Plot GPU temperature
+    ax4.set_xlabel("Timestamp")
+    ax4.xaxis.set_major_formatter(DateFormatter("%H:%M"))
+
+    # Plot HDD usage
+    ax5.set_xlabel("Timestamp")
+    ax5.xaxis.set_major_formatter(DateFormatter("%H:%M"))
+
+    # Plot other temperatures
+    ax6.set_xlabel("Timestamp")
+    ax6.xaxis.set_major_formatter(DateFormatter("%H:%M"))
+
+
+
 
     # Adjust layout and save the figure
     plt.tight_layout(rect=[0, 0, 1, 0.96])
