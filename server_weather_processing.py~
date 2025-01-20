@@ -1068,7 +1068,7 @@ def main():
         forecaster.save_model(model_path)
 
     # Proceed with inference
-    steps_ahead = 600
+    steps_ahead = 60
     recent_data = forecaster.load_master_data()
     timestamps = pd.to_datetime(recent_data["Timestamp"])  # Convert to datetime
     last_timestamp = timestamps.iloc[-1]  # The most recent timestamp

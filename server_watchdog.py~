@@ -7,7 +7,16 @@ import os
 def clean_ram():
     """Attempt to free up memory by running garbage collection."""
     gc.collect()
-    print("Garbage collection completed.")
+    # Drop caches on Linux
+    if os.name == "posix":
+        try:
+            subprocess.run(
+                ["sudo", "/bin/bash", "-c", "echo 3 > /proc/sys/vm/drop_caches"],
+                check=True
+            )
+            print("Dropped caches successfully.")
+        except Exception as e:
+            print(f"Failed to drop caches: {e}")
 
 def kill_zombie_processes():
     """Terminate any zombie processes to release system resources."""
@@ -27,7 +36,7 @@ while True:
     except Exception as e:
         print(f"Unexpected error: {e}. Restarting in 5 seconds...")
 
-    # Clean up RAM and kill zombie processes
+    # Clean up RAM and kill zombies
     clean_ram()
     kill_zombie_processes()
 

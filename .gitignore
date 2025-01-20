@@ -1,14 +1,16 @@
-# Exclude all data files
+# Ignore image files
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# Ignore data files
 *.csv
 *.json
-*.png
-*.pth
-*.html
 
-# Exclude Python backup files
-*~
-
-# Exclude cache and temporary files
+# Ignore Python cache and backup files
 __pycache__/
 *.pyc
-
+*.pyo
+*.~ 
+.DS_Store
