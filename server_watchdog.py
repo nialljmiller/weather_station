@@ -22,15 +22,18 @@ def kill_zombie_processes():
 while True:
     try:
         subprocess.run(["python", "server_weather_processing.py"], check=True)
+        retry_time = 40
     except subprocess.CalledProcessError as e:
-        print(f"Script crashed with exit code {e.returncode}. Restarting in 5 seconds...")
+        retry_time = 5
+        print(f"Script crashed with exit code {e.returncode}. Restarting in {retry_time} seconds...")
     except Exception as e:
-        print(f"Unexpected error: {e}. Restarting in 5 seconds...")
+        retry_time = 5
+        print(f"Unexpected error: {e}. Restarting in {retry_time} seconds...")
 
     # Clean up RAM and kill zombie processes
     clean_ram()
     kill_zombie_processes()
 
     # Wait before restarting
-    time.sleep(5)
+    time.sleep(retry_time)
 

@@ -680,7 +680,7 @@ def save_last_minute_averages(data, predict_data, output_file):
     # Calculate averages
     averages = {
         "Temperature (°C/°F)": f"{last_minute_data['Median_Temperature_C'].mean():.2f}°C / {last_minute_data['Median_Temperature_F'].mean():.2f}°F",
-        "Predicted Temp (10 min avg) (°C/°F)": f"{predict_data['Predicted_Temperature'].mean():.2f}°C / {predict_data['Predicted_Temperature'].mean() * 9 / 5 + 32:.2f}°F",
+        "Predicted Temp (Hour avg) (°C/°F)": f"{predict_data['Predicted_Temperature'].mean():.2f}°C / {predict_data['Predicted_Temperature'].mean() * 9 / 5 + 32:.2f}°F",
         "Humidity (%)": last_minute_data["DHT_Humidity_percent"].mean(),
         "Pressure (kPa)": last_minute_data["BMP_Pressure_hPa"].mean() / 10,
         "Light (lx)": last_minute_data["BH1750_Light_lx"].mean(),
@@ -1068,7 +1068,7 @@ def main():
         forecaster.save_model(model_path)
 
     # Proceed with inference
-    steps_ahead = 60
+    steps_ahead = 600
     recent_data = forecaster.load_master_data()
     timestamps = pd.to_datetime(recent_data["Timestamp"])  # Convert to datetime
     last_timestamp = timestamps.iloc[-1]  # The most recent timestamp

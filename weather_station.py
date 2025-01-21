@@ -113,9 +113,57 @@ while True:
             write_timer = time.time()
             print("Transferring data to the server...")
             try:
-                subprocess.run(["scp", "-l", "500", local_csv, f"{server_address}:{server_csv_path}"],check=True)
+                                
 
-                subprocess.run(["scp", "-l", "500", system_csv_file, f"{server_address}:{system_server_csv_path}"],check=True)
+                max_retries = 3
+                bandwidth_limit = "500"  # Bandwidth limit in Kbps
+                connection_timeout = "10"  # Connection timeout in seconds
+
+                # First SCP command
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        print(f"Attempt {attempt} to copy {local_csv} to {server_address}:{server_csv_path}")
+                        subprocess.run(
+                            [
+                                "scp", "-v", "-l", bandwidth_limit,
+                                "-o", f"ConnectTimeout={connection_timeout}",
+                                local_csv, f"{server_address}:{server_csv_path}"
+                            ],
+                            check=True
+                        )
+                        print(f"File {local_csv} successfully copied on attempt {attempt}.")
+                        break
+                    except subprocess.CalledProcessError as e:
+                        print(f"Error during copy attempt {attempt}: {e}")
+                        if attempt < max_retries:
+                            print("Retrying...")
+                            time.sleep(5)  # Wait 5 seconds before retrying
+                        else:
+                            print(f"All {max_retries} attempts failed for {local_csv}.")
+                            raise
+
+                # Second SCP command
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        print(f"Attempt {attempt} to copy {system_csv_file} to {server_address}:{system_server_csv_path}")
+                        subprocess.run(
+                            [
+                                "scp", "-v", "-l", bandwidth_limit,
+                                "-o", f"ConnectTimeout={connection_timeout}",
+                                system_csv_file, f"{server_address}:{system_server_csv_path}"
+                            ],
+                            check=True
+                        )
+                        print(f"File {system_csv_file} successfully copied on attempt {attempt}.")
+                        break
+                    except subprocess.CalledProcessError as e:
+                        print(f"Error during copy attempt {attempt}: {e}")
+                        if attempt < max_retries:
+                            print("Retrying...")
+                            time.sleep(5)  # Wait 5 seconds before retrying
+                        else:
+                            print(f"All {max_retries} attempts failed for {system_csv_file}.")
+                            raise
 
                 print("Data successfully transferred to the server.")
                 delete_counter = delete_counter + 1
