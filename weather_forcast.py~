@@ -36,27 +36,54 @@ class WeatherForecaster:
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=3, verbose=True)
 
-        # Load and preprocess data
+        # Preprocessing logic
         master_data = self.data if self.data is not None else self.load_master_data()
-        self.data = master_data[["DHT_Humidity_percent", "BMP_Temperature_C", "BMP_Pressure_hPa"]].values
-        self.data = self.smooth_data(self.data, window_size=10)
+        self.data = self.process_input_data(master_data[["DHT_Humidity_percent", "BMP_Temperature_C", "BMP_Pressure_hPa"]].values)
+
+    def process_input_data(self, data):
+        data = self.smooth_data(data, window_size=10)
 
         # Hard scale temperature between global min and max
-        self.temp_min = np.min(self.data[:, 1])
-        self.temp_max = np.max(self.data[:, 1])
-        self.data[:, 1] = (self.data[:, 1] - self.temp_min) / (self.temp_max - self.temp_min)
+        self.temp_min = np.min(data[:, 1])
+        self.temp_max = np.max(data[:, 1])
+        data[:, 1] = (data[:, 1] - self.temp_min) / (self.temp_max - self.temp_min)
 
         # Hard scale humidity between global min and max
-        self.hum_min = np.min(self.data[:, 0])
-        self.hum_max = np.max(self.data[:, 0])
-        self.data[:, 0] = (self.data[:, 0] - self.hum_min) / (self.hum_max - self.hum_min)
+        self.hum_min = np.min(data[:, 0])
+        self.hum_max = np.max(data[:, 0])
+        data[:, 0] = (data[:, 0] - self.hum_min) / (self.hum_max - self.hum_min)
 
         # Hard scale pressure between global min and max
-        self.pres_min = np.min(self.data[:, 2])
-        self.pres_max = np.max(self.data[:, 2])
-        self.data[:, 2] = (self.data[:, 2] - self.pres_min) / (self.pres_max - self.pres_min)
+        self.pres_min = np.min(data[:, 2])
+        self.pres_max = np.max(data[:, 2])
+        data[:, 2] = (data[:, 2] - self.pres_min) / (self.pres_max - self.pres_min)
 
-        self.seq_length = max(1, len(self.data) // self.target_seq_length)
+        # Add interaction terms (covariance-like features)
+        humidity = data[:, 0]
+        temperature = data[:, 1]
+        pressure = data[:, 2]
+        data = np.column_stack((
+            data,
+            humidity * temperature,  # Interaction between humidity and temperature
+            humidity * pressure,     # Interaction between humidity and pressure
+            temperature * pressure   # Interaction between temperature and pressure
+        ))
+
+        # Add lag features
+        lags = [5, 30, 300]  # Example lag steps
+        df = pd.DataFrame(data)
+        for lag in lags:
+            lagged_data = df.shift(lag).fillna(method='bfill').values
+            data = np.column_stack((data, lagged_data))
+
+
+        # Add rate of change (first-order derivatives)
+        rate_of_change = np.diff(data, axis=0, prepend=data[0:1, :])
+        data = np.column_stack((data, rate_of_change))
+        # Update input_dim to match new data shape
+        self.input_dim = data.shape[1]
+        self.seq_length = max(1, len(data) // self.target_seq_length)
+        return data
 
     def inverse_transform_predictions(self, predictions):
         """
@@ -69,22 +96,40 @@ class WeatherForecaster:
     def predict_future(self, recent_sequence, steps_ahead=6):
         """
         Predict future temperature values.
-        :param recent_sequence: Recent sequence of normalized input data.
+        :param recent_sequence: Recent sequence of normalized input data (3D tensor).
         :param steps_ahead: Number of future steps to predict.
         :return: Denormalized future predictions.
         """
         self.model.eval()
         future_predictions = []
+        
+        # Convert recent_sequence to 2D to process
+        if isinstance(recent_sequence, torch.Tensor):
+            recent_sequence = recent_sequence.squeeze(0).cpu().numpy()  # Shape: (seq_length, input_dim)
+
+        # Preprocess input sequence
+        processed_sequence = self.process_input_data(recent_sequence)
+
+        # Convert back to 3D tensor for LSTM
+        processed_sequence = torch.tensor(processed_sequence, dtype=torch.float32).unsqueeze(0).to(self.device)  # Shape: (1, seq_length, input_dim)
+
         for _ in range(steps_ahead):
             with torch.no_grad():
-                next_prediction = self.model(recent_sequence).item()
+                # Predict the next value
+                next_prediction = self.model(processed_sequence).item()
                 future_predictions.append(next_prediction)
-                last_timestep = recent_sequence[:, -1, :].clone()
+                
+                # Update the sequence with the predicted value
+                last_timestep = processed_sequence[:, -1, :].clone()
                 next_timestep = last_timestep.clone()
-                next_timestep[0, 1] = next_prediction  # Update temperature
-                recent_sequence = torch.cat((recent_sequence[:, 1:, :], next_timestep.unsqueeze(1)), dim=1)
+                next_timestep[0, 1] = next_prediction  # Update temperature feature
+                
+                # Shift sequence and append the new timestep
+                processed_sequence = torch.cat((processed_sequence[:, 1:, :], next_timestep.unsqueeze(1)), dim=1)
 
+        # Denormalize predictions
         return self.inverse_transform_predictions(np.array(future_predictions))
+
 
     @staticmethod
     def smooth_data(data, window_size=10):
@@ -145,7 +190,6 @@ class WeatherForecaster:
         self.num_layers = checkpoint['num_layers']
         self.learning_rate = checkpoint['learning_rate']
         print(f"Model loaded from {model_path}")
-
 
 
     @staticmethod

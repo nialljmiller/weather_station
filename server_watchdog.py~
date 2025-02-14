@@ -3,20 +3,13 @@ import time
 import gc
 import psutil
 import os
+import datetime
+import threading
 
 def clean_ram():
     """Attempt to free up memory by running garbage collection."""
     gc.collect()
-    # Drop caches on Linux
-    if os.name == "posix":
-        try:
-            subprocess.run(
-                ["sudo", "/bin/bash", "-c", "echo 3 > /proc/sys/vm/drop_caches"],
-                check=True
-            )
-            print("Dropped caches successfully.")
-        except Exception as e:
-            print(f"Failed to drop caches: {e}")
+    print("Garbage collection completed.")
 
 def kill_zombie_processes():
     """Terminate any zombie processes to release system resources."""
@@ -28,18 +21,70 @@ def kill_zombie_processes():
             except Exception as ex:
                 print(f"Failed to kill process {proc.info['pid']}: {ex}")
 
-while True:
-    try:
-        subprocess.run(["python", "server_weather_processing.py"], check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"Script crashed with exit code {e.returncode}. Restarting in 5 seconds...")
-    except Exception as e:
-        print(f"Unexpected error: {e}. Restarting in 5 seconds...")
+def run_ingest():
+    """Runs the ingest script every 30 seconds in a separate thread."""
+    while True:
+        try:
+            subprocess.run(["python", "server_weather_ingest.py"], check=True)
+            retry_time = 30            
+        except subprocess.CalledProcessError as e:
+            retry_time = 5
+            print(f"Processing script crashed with exit code {e.returncode}. Restarting in {retry_time} seconds...")
+        except Exception as e:
+            retry_time = 5
+            print(f"Unexpected error in processing script: {e}. Restarting in {retry_time} seconds...")
+         
+        # Clean up RAM and kill zombie processes
+        clean_ram()
+        kill_zombie_processes()
 
-    # Clean up RAM and kill zombies
-    clean_ram()
-    kill_zombie_processes()
+        # Countdown timer before restarting
+        for remaining in range(retry_time, 0, -1):
+            print(f"Restarting ingest in {remaining} seconds...", end="\r", flush=True)
+            time.sleep(1)
+        print("Restarting now!                               ")
 
-    # Wait before restarting
-    time.sleep(5)
+def run_processing():
+    """Runs the processing script in the main loop."""
+    while True:
+        try:
+            subprocess.run(["python", "server_weather_processing.py"], check=True)
+            proc_retry_time = 120
 
+            # Current time
+            current_time = datetime.datetime.now()
+            start_time = current_time + datetime.timedelta(seconds=proc_retry_time)
+
+            print(
+                f"Iteration complete!!!!! \n\n"
+                f"\tCurrent time: {current_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"\tSleeping for {retry_time / 60:.2f} mins...\n"
+                f"\tWill start again at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"============================================================================================="
+            )
+        except subprocess.CalledProcessError as e:
+            proc_retry_time = 5
+            print(f"Processing script crashed with exit code {e.returncode}. Restarting in {proc_retry_time} seconds...")
+        except Exception as e:
+            proc_retry_time = 5
+            print(f"Unexpected error in processing script: {e}. Restarting in {proc_retry_time} seconds...")
+        
+        # Clean up RAM and kill zombie processes
+        clean_ram()
+        kill_zombie_processes()
+
+        # Wait before restarting
+        # Countdown timer before restarting
+        for remaining in range(proc_retry_time, 0, -1):
+            print(f"Restarting processing in {remaining} seconds...", end="\r", flush=True)
+            time.sleep(1)
+        print("Restarting now!                               ")
+
+
+if __name__ == "__main__":
+    # Start the ingest script in a separate thread
+    ingest_thread = threading.Thread(target=run_ingest, daemon=True)
+    ingest_thread.start()
+    
+    # Run the processing script in the main loop
+    run_processing()

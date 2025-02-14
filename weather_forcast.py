@@ -18,6 +18,10 @@ import numpy as np
 import pandas as pd
 from datetime import timedelta
 
+
+
+
+
 class WeatherForecaster:
     def __init__(self, master_file=None, data=None, input_dim=3, hidden_dim=64, output_dim=1,
                  num_layers=2, learning_rate=0.001, batch_size=256, device=None, target_seq_length=1000):
@@ -36,27 +40,96 @@ class WeatherForecaster:
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=3, verbose=True)
 
-        # Load and preprocess data
+        # Preprocessing logic
         master_data = self.data if self.data is not None else self.load_master_data()
-        self.data = master_data[["DHT_Humidity_percent", "BMP_Temperature_C", "BMP_Pressure_hPa"]].values
-        self.data = self.smooth_data(self.data, window_size=10)
+        self.data = self.process_input_data(master_data[["DHT_Humidity_percent", "BMP_Temperature_C", "BMP_Pressure_hPa"]].values)
+        
+        
 
-        # Hard scale temperature between global min and max
-        self.temp_min = np.min(self.data[:, 1])
-        self.temp_max = np.max(self.data[:, 1])
-        self.data[:, 1] = (self.data[:, 1] - self.temp_min) / (self.temp_max - self.temp_min)
+    def debug_data(self,data, step_name):
+        """
+        Debug the data for NaN and extreme values after each preprocessing step.
+        :param data: Processed data as a NumPy array.
+        :param step_name: Description of the current step.
+        """
+        print(f"Debugging data after {step_name}:")
+        print(f"Shape: {data.shape}")
+        print(f"Min: {np.nanmin(data)}")  # Handles NaN safely
+        print(f"Max: {np.nanmax(data)}")
+        print(f"NaN count: {np.isnan(data).sum()}")
+        print(f"First row: {data[0]}")
+        print(f"Last row: {data[-1]}")
+        
+        
+        
+    def process_input_data(self, data):
+        data = self.validate_input_data(data)
+        #self.debug_data(data, "raw input validation")
 
-        # Hard scale humidity between global min and max
-        self.hum_min = np.min(self.data[:, 0])
-        self.hum_max = np.max(self.data[:, 0])
-        self.data[:, 0] = (self.data[:, 0] - self.hum_min) / (self.hum_max - self.hum_min)
+        data = self.smooth_data(data, window_size=10)
+        #self.debug_data(data, "smoothing")
 
-        # Hard scale pressure between global min and max
-        self.pres_min = np.min(self.data[:, 2])
-        self.pres_max = np.max(self.data[:, 2])
-        self.data[:, 2] = (self.data[:, 2] - self.pres_min) / (self.pres_max - self.pres_min)
+        # Hard scale temperature
+        self.temp_min = np.min(data[:, 1])
+        self.temp_max = np.max(data[:, 1])
+        data[:, 1] = (data[:, 1] - self.temp_min) / (self.temp_max - self.temp_min) if self.temp_max != self.temp_min else 0
+        #self.debug_data(data, "temperature scaling")
 
-        self.seq_length = max(1, len(self.data) // self.target_seq_length)
+        # Hard scale humidity
+        self.hum_min = np.min(data[:, 0])
+        self.hum_max = np.max(data[:, 0])
+        data[:, 0] = (data[:, 0] - self.hum_min) / (self.hum_max - self.hum_min) if self.hum_max != self.hum_min else 0
+        #self.debug_data(data, "humidity scaling")
+
+        # Hard scale pressure
+        self.pres_min = np.min(data[:, 2])
+        self.pres_max = np.max(data[:, 2])
+        data[:, 2] = (data[:, 2] - self.pres_min) / (self.pres_max - self.pres_min) if self.pres_max != self.pres_min else 0
+        #self.debug_data(data, "pressure scaling")
+
+        # Add interaction terms
+        humidity, temperature, pressure = data[:, 0], data[:, 1], data[:, 2]
+        data = np.column_stack((data, humidity * temperature, humidity * pressure, temperature * pressure))
+        #self.debug_data(data, "interaction terms")
+
+        # Add lag features
+        lags = [5, 30, 300]
+        df = pd.DataFrame(data)
+        for lag in lags:
+            lagged_data = df.shift(lag).bfill().values
+            data = np.column_stack((data, lagged_data))
+        #self.debug_data(data, "lag features")
+
+        # Add rate of change
+        rate_of_change = np.diff(data, axis=0, prepend=data[0:1, :])
+        data = np.column_stack((data, rate_of_change))
+        #self.debug_data(data, "rate of change")
+
+        # Final NaN cleaning
+        if np.isnan(data).any():
+            print("Warning: NaN detected in final processed data. Replacing with zeros...")
+            data = np.nan_to_num(data, nan=0.0)
+
+        # Update input_dim and seq_length
+        self.input_dim = data.shape[1]
+        self.seq_length = max(1, len(data) // self.target_seq_length)
+        return data
+
+
+    def validate_input_data(self, data):
+        """
+        Validate input data to ensure there are no NaN or extreme values.
+        :param data: Input data as a NumPy array.
+        :return: Cleaned data with issues logged.
+        """
+        if np.isnan(data).any():
+            print("Warning: Input data contains NaN values. Attempting to fill...")
+            data = pd.DataFrame(data).fillna(method='ffill').fillna(method='bfill').values
+        if np.isinf(data).any():
+            print("Warning: Input data contains infinite values. Clipping...")
+            data = np.clip(data, a_min=np.finfo(np.float32).min, a_max=np.finfo(np.float32).max)
+        return data
+
 
     def inverse_transform_predictions(self, predictions):
         """
@@ -69,22 +142,53 @@ class WeatherForecaster:
     def predict_future(self, recent_sequence, steps_ahead=6):
         """
         Predict future temperature values.
-        :param recent_sequence: Recent sequence of normalized input data.
+        :param recent_sequence: Recent sequence of normalized input data (3D tensor).
         :param steps_ahead: Number of future steps to predict.
         :return: Denormalized future predictions.
         """
         self.model.eval()
         future_predictions = []
+
+        # Convert recent_sequence to 2D to process
+        if isinstance(recent_sequence, torch.Tensor):
+            recent_sequence = recent_sequence.squeeze(0).cpu().numpy()  # Shape: (seq_length, input_dim)
+
+        # Preprocess input sequence
+        processed_sequence = self.process_input_data(recent_sequence)
+
+        # Convert back to 3D tensor for LSTM
+        processed_sequence = torch.tensor(processed_sequence, dtype=torch.float32).unsqueeze(0).to(self.device)  # Shape: (1, seq_length, input_dim)
+
+
+        # Debugging processed_sequence
+        #print("Processed sequence stats:")
+        #print(f"Shape: {processed_sequence.shape}")
+        #print(f"Min: {processed_sequence.min().item()}")
+        #print(f"Max: {processed_sequence.max().item()}")
+        #print(f"NaN count: {(processed_sequence != processed_sequence).sum().item()}")
+
+        # Handle NaN values
+        if torch.isnan(processed_sequence).any():
+            print("Warning: Processed sequence contains NaN values. Attempting to fix...")
+            processed_sequence = torch.nan_to_num(processed_sequence, nan=0.0)
+
         for _ in range(steps_ahead):
             with torch.no_grad():
-                next_prediction = self.model(recent_sequence).item()
+                # Predict the next value
+                next_prediction = self.model(processed_sequence).item()
                 future_predictions.append(next_prediction)
-                last_timestep = recent_sequence[:, -1, :].clone()
-                next_timestep = last_timestep.clone()
-                next_timestep[0, 1] = next_prediction  # Update temperature
-                recent_sequence = torch.cat((recent_sequence[:, 1:, :], next_timestep.unsqueeze(1)), dim=1)
 
+                # Update the sequence with the predicted value
+                last_timestep = processed_sequence[:, -1, :].clone()
+                next_timestep = last_timestep.clone()
+                next_timestep[0, 1] = next_prediction # Update temperature feature
+
+                # Shift sequence and append the new timestep
+                processed_sequence = torch.cat((processed_sequence[:, 1:, :], next_timestep.unsqueeze(1)), dim=1)
+
+        # Denormalize predictions
         return self.inverse_transform_predictions(np.array(future_predictions))
+
 
     @staticmethod
     def smooth_data(data, window_size=10):
@@ -145,7 +249,6 @@ class WeatherForecaster:
         self.num_layers = checkpoint['num_layers']
         self.learning_rate = checkpoint['learning_rate']
         print(f"Model loaded from {model_path}")
-
 
 
     @staticmethod

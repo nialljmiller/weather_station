@@ -1,41 +1,261 @@
+# Standard Library Imports
+import re
 import os
 import csv
 import json
 import time
 import warnings
+import glob
+import subprocess
+import mimetypes
+import logging
 from datetime import datetime, timedelta
-
-
-import numpy as np
-import pandas as pd
-import pytz
-from pytz import UTC  # Ensure all datetimes are timezone-aware
+from io import BytesIO
+import logging
+from PIL import ImageFont
+import os
+import glob
+import logging
+import json
 import torch
+import pandas as pd
+from torchvision.ops import nms
+from PIL import Image, ImageDraw, ImageFont, ImageSequence
+from datetime import datetime
+from tqdm import tqdm
+
+import os
+import glob
+import logging
+from PIL import Image, ImageDraw, ImageFont
+import torch
+import pandas as pd
+from torchvision.ops import nms
+
+import os
+import glob
+import logging
+from PIL import Image, ImageDraw, ImageFont
+import torch
+import pandas as pd
+from torchvision.ops import nms
+import torch
+import pandas as pd
+import numpy as np
+import pytz
+from pytz import UTC
+from PIL import Image, ImageDraw, ImageFont
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+import matplotlib.collections
+import matplotlib.dates  # Additional import if specific functions are needed
+import matplotlib.ticker as mticker
+import matplotlib.ticker as ticker
+from matplotlib.dates import DateFormatter
 from scipy.interpolate import make_interp_spline
 from scipy.optimize import curve_fit
 from sklearn.preprocessing import MinMaxScaler
 from numpy.polynomial import Polynomial
 import GPy
-import mimetypes
-from matplotlib.dates import DateFormatter
+import os
+import glob
+import logging
+from PIL import Image, ImageDraw, ImageFont
+import torch
+import pandas as pd
+from torchvision.ops import nms
+import psutil
+from pynvml import (
+    nvmlInit,
+    nvmlDeviceGetHandleByIndex,
+    nvmlDeviceGetUtilizationRates,
+    nvmlDeviceGetMemoryInfo,
+    nvmlDeviceGetTemperature,
+    nvmlShutdown,
+)
+from pynvml import *
+import warnings
 
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-import matplotlib.collections
-import matplotlib.dates
-import matplotlib.ticker as mticker
+# Suppress FutureWarnings related to torch.cuda.amp.autocast
+warnings.filterwarnings(
+    "ignore", 
+    message=".*torch\\.cuda\\.amp\\.autocast.*", 
+    category=FutureWarning
+)
 
+# Custom Module Imports
 from weather_forcast import WeatherForecaster  # Assuming it's a custom module
 
 # Suppress specific warnings
 warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 
+# Setup logging
+logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
-import psutil
-import csv
-from datetime import datetime
-from pynvml import nvmlInit, nvmlDeviceGetHandleByIndex, nvmlDeviceGetUtilizationRates, nvmlDeviceGetMemoryInfo, nvmlDeviceGetTemperature, nvmlShutdown
-import subprocess
+
+
+
+# File paths
+INCOMING_FILE = "/media/bigdata/weather_station/weather_data.csv"
+MASTER_FILE = "/media/bigdata/weather_station/all_data.csv"
+MASTER_FILE_json = "/media/bigdata/weather_station/all_data.json"
+PLOT_ALL_TIME = "/media/bigdata/weather_station/weather_plot_all.png"
+PLOT_1_DAY = "/media/bigdata/weather_station/weather_plot_1_day.png"
+PLOT_1_HOUR = "/media/bigdata/weather_station/weather_plot_1_hour.png"
+ROLLING_AVERAGES_FILE = "/media/bigdata/weather_station/rolling_averages.csv"
+PREDICT_FILE = "/media/bigdata/weather_station/predictions.csv"
+
+
+# Ensure master file exists
+if not os.path.exists(MASTER_FILE):
+    pd.DataFrame(columns=[
+        "Timestamp", "BMP_Temperature_C", "BMP_Pressure_hPa",
+        "BMP_Altitude_m", "DHT_Temperature_C", "DHT_Humidity_percent",
+        "BH1750_Light_lx"
+    ]).to_csv(MASTER_FILE, index=False)
+
+
+
+
+def load_master_data(fp):
+    """Load the master data from the CSV file."""
+    data = pd.read_csv(fp, on_bad_lines='skip') 
+    data["Timestamp"] = pd.to_datetime(data["Timestamp"], errors="coerce")
+    data = data.dropna(subset=["Timestamp"])  # Drop rows with invalid timestamps
+    data = data.sort_values("Timestamp").reset_index(drop=True)
+    return data
+
+def append_new_data(master_data):
+    """Append new data from the incoming file to the master DataFrame."""
+    if not os.path.exists(INCOMING_FILE):
+        print(f"Incoming file {INCOMING_FILE} does not exist. Skipping this iteration.")
+        return master_data
+
+    # Validate file type
+    file_type, encoding = mimetypes.guess_type(INCOMING_FILE)
+    if file_type != "text/csv":
+        print(f"Warning: {INCOMING_FILE} is not a text/csv file. Detected type: {file_type}")
+        return master_data
+
+    # Load incoming data
+    try:
+        incoming_data = pd.read_csv(INCOMING_FILE, encoding="utf-8", on_bad_lines="skip")
+        incoming_data["Timestamp"] = pd.to_datetime(incoming_data["Timestamp"], errors="coerce")
+        incoming_data = incoming_data.dropna(subset=["Timestamp"])
+    except Exception as e:
+        print(f"Error loading incoming data: {e}")
+        return master_data
+
+    # Ensure timestamps are timezone-aware and converted to UTC
+    if incoming_data["Timestamp"].dt.tz is None:
+        incoming_data["Timestamp"] = incoming_data["Timestamp"].dt.tz_localize("UTC")
+    else:
+        incoming_data["Timestamp"] = incoming_data["Timestamp"].dt.tz_convert("UTC")
+
+    if master_data["Timestamp"].dt.tz is None:
+        master_data["Timestamp"] = master_data["Timestamp"].dt.tz_localize("UTC")
+    else:
+        master_data["Timestamp"] = master_data["Timestamp"].dt.tz_convert("UTC")
+
+    # Concatenate and remove duplicates
+    combined_data = pd.concat([master_data, incoming_data], ignore_index=True)
+    combined_data = combined_data.drop_duplicates(subset="Timestamp").sort_values("Timestamp").reset_index(drop=True)
+
+    # Save to master file
+    combined_data.to_csv(MASTER_FILE, index=False)
+    generate_json_from_csv(MASTER_FILE, MASTER_FILE_json)
+    print(f"Appended new data and saved to {MASTER_FILE}. Total rows: {len(combined_data)}.")
+
+    return combined_data
+
+
+
+def generate_hourly_gif(image_dir, output_gif):
+    """
+    Generates a GIF from the most recent hour of images with a timestamp (in Mountain Time)
+    in the bottom-right corner.
+    
+    Args:
+        image_dir (str): Directory where images are stored.
+        output_gif (str): Path to save the final GIF.
+    """
+    # Temporary filename to avoid access issues
+    temp_gif = os.path.join(os.path.dirname(output_gif), "temp.gif")
+
+    # Get current time in UTC
+    now = datetime.utcnow()
+
+    # Get all images sorted by timestamp
+    image_files = sorted(glob.glob(f"{image_dir}/*.jpg"))
+
+    # Filter images from the last hour
+    recent_images = []
+    for img in image_files:
+        try:
+            # Extract timestamp from filename (new format: YYYYMMDD_HHMMSS)
+            img_filename = os.path.basename(img).replace(".jpg", "")
+            img_timestamp = datetime.strptime(img_filename, "%Y%m%d_%H%M%S")
+            if now - img_timestamp <= timedelta(hours=1):
+                recent_images.append((img, img_timestamp))
+        except ValueError:
+            continue  # Skip files with incorrect naming format
+
+    # Ensure there are enough images to make a GIF
+    if len(recent_images) < 2:
+        print("[GIF] Not enough images to generate GIF (need at least 2). Skipping.")
+        return
+
+    print(f"[GIF] Generating GIF from {len(recent_images)} images...")
+
+    frames = []
+    # Define the Mountain Time zone (using America/Denver, which handles DST)
+    mountain_tz = pytz.timezone("America/Denver")
+
+    for img_path, timestamp in recent_images:
+        # First, treat the naive timestamp as UTC
+        utc_timestamp = pytz.UTC.localize(timestamp)
+        # Convert the timestamp to Mountain Time
+        mountain_time = utc_timestamp.astimezone(mountain_tz)
+
+        # Open image and flip vertically
+        img = Image.open(img_path).transpose(Image.ROTATE_180)
+
+        # Create a draw object
+        draw = ImageDraw.Draw(img)
+        
+        # Load font (default PIL font if not found)
+        try:
+            font = ImageFont.truetype("arial.ttf", 512)  # Adjust size if needed
+        except IOError:
+            font = ImageFont.load_default()
+
+        # Format timestamp in Mountain Time
+        text = mountain_time.strftime("%Y-%m-%d %H:%M:%S")
+        text_color = (255, 0, 0)  # Red
+        text_position = (img.width - 150, img.height - 30)  # Bottom-right corner
+
+        # Draw timestamp
+        draw.text(text_position, text, font=font, fill=text_color)
+
+        frames.append(img)
+
+    # Save GIF as temporary file
+    frames[0].save(
+        temp_gif,
+        save_all=True,
+        append_images=frames[1:],
+        duration=100,  # 100ms per frame
+        loop=0
+    )
+
+    # Rename temp.gif to the final name (atomic operation)
+    os.replace(temp_gif, output_gif)
+    
+    print(f"[GIF] GIF saved to {output_gif}.")
+
+
+
 
 
 def initialize_csv(output_file="system_stats.csv"):
@@ -43,18 +263,26 @@ def initialize_csv(output_file="system_stats.csv"):
     with open(output_file, mode='w', newline='') as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow([
-            "Timestamp", "CPU Usage (%)", "CPU Temp (°C)",
-            "Memory Usage (%)", "GPU Usage (%)", "GPU Memory Usage (%)",
-            "GPU Temp (°C)", "HDD Usage", "Other Temperatures"
+            "Timestamp",
+            "CPU Usage (%)",
+            "CPU Temp (°C)",
+            "Memory Usage (%)",
+            "GPU Usage (%)",
+            "GPU Memory Usage (%)",
+            "GPU Temp (°C)",
+            "Disk Usage",
+            "Net Disk I/O (MB)",
+            "Thermals"
         ])
-
+        
+        
 
 def gather_system_stats(output_file="system_stats.csv"):
-    """Appends system stats to the CSV file."""
+    """Appends detailed system stats to the CSV file."""
     # Initialize NVIDIA Management Library (for GPU stats)
     nvmlInit()
     gpu_handle = nvmlDeviceGetHandleByIndex(0)  # Assuming a single NVIDIA GPU
-    
+
     # Gather CPU usage and temperature
     cpu_usage = psutil.cpu_percent(interval=1)
     cpu_temp = None
@@ -62,59 +290,74 @@ def gather_system_stats(output_file="system_stats.csv"):
         # Attempt to get CPU temperature (Linux-specific)
         cpu_temp = psutil.sensors_temperatures()["coretemp"][0].current
     except KeyError:
-        pass
+        cpu_temp = "N/A"
 
-    # Gather CPU memory stats
+    # Gather memory usage stats
     memory = psutil.virtual_memory()
     memory_usage = memory.percent
 
     # Gather GPU usage and temperature
     gpu_utilization = nvmlDeviceGetUtilizationRates(gpu_handle)
     gpu_memory = nvmlDeviceGetMemoryInfo(gpu_handle)
-    gpu_temp = nvmlDeviceGetTemperature(gpu_handle, 0)
+    gpu_temp = nvmlDeviceGetTemperature(gpu_handle, NVML_TEMPERATURE_GPU)
 
-    # Gather disk usage stats (excluding free space/capacity details)
-    hdd_usage = []
+    # Gather disk usage stats
+    disk_usage = []
     for partition in psutil.disk_partitions():
         try:
             usage = psutil.disk_usage(partition.mountpoint)
-            hdd_usage.append({
+            disk_usage.append({
                 "device": partition.device,
                 "mountpoint": partition.mountpoint,
-                "used": usage.used
+                "used": usage.used,
+                "total": usage.total,
+                "percent": usage.percent
             })
         except PermissionError:
             continue
 
-    # Additional temperatures (Linux sensors via subprocess)
-    other_temps = {}
+    # Gather net disk I/O
+    disk_io = psutil.disk_io_counters()
+    total_read = disk_io.read_bytes / (1024**2)  # Convert to MB
+    total_write = disk_io.write_bytes / (1024**2)  # Convert to MB
+
+    # Gather additional temperatures using `sensors`
+    formatted_temps = {}
     try:
         sensors_output = subprocess.check_output(["sensors"], text=True).splitlines()
         for line in sensors_output:
-            if line.strip() and ":" in line:
+            if ":" in line:
                 parts = line.split(":")
                 label = parts[0].strip()
-                temp = parts[1].split()[0]
-                if temp.replace(".", "").isdigit():
-                    other_temps[label] = temp
+                temp_data = parts[1].strip().split()
+                if temp_data and temp_data[0].replace(".", "").isdigit():
+                    formatted_temps[label] = float(temp_data[0].replace("°C", ""))
     except Exception as e:
         print(f"Error fetching additional temperatures: {e}")
+
+    # Format disk usage and temperatures for CSV
+    disk_usage_str = "; ".join(
+        f"{entry['device']}({entry['mountpoint']}): {entry['used']/1024**3:.2f}GB/{entry['total']/1024**3:.2f}GB ({entry['percent']}%)"
+        for entry in disk_usage
+    )
+    temp_str = "; ".join(f"{key}: {value}°C" for key, value in formatted_temps.items())
 
     # Append data to CSV
     with open(output_file, mode='a', newline='') as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow([
             datetime.now(),
-            cpu_usage,
-            cpu_temp if cpu_temp is not None else "N/A",
-            memory_usage,
-            gpu_utilization.gpu,
-            gpu_memory.used / gpu_memory.total * 100,
-            gpu_temp,
-            ", ".join(f"{hdd['device']}={hdd['used']}" for hdd in hdd_usage),
-            ", ".join(f"{key}={value}" for key, value in other_temps.items())
+            f"{cpu_usage}%",
+            f"{cpu_temp}°C" if cpu_temp != "N/A" else "N/A",
+            f"{memory_usage}%",
+            f"{gpu_utilization.gpu}%",
+            f"{gpu_memory.used / gpu_memory.total * 100:.2f}%",
+            f"{gpu_temp}°C",
+            disk_usage_str,
+            f"Read: {total_read:.2f}MB, Write: {total_write:.2f}MB",
+            temp_str
         ])
-    
+
     nvmlShutdown()
 
 
@@ -170,9 +413,10 @@ def plot_training_loss(file_path="training_loss.csv", output_path="training_loss
         print(f"An error occurred: {e}")
 
 
+
 def plot_final_losses(file_path="final_losses.csv", output_path="final_losses_plot.png"):
     """
-    Reads final_losses.csv and saves a bar plot of the final losses across runs.
+    Reads final_losses.csv and saves a line plot of the final losses across runs with an exponential y-axis.
     """
     try:
         with open(file_path, mode='r') as file:
@@ -189,10 +433,11 @@ def plot_final_losses(file_path="final_losses.csv", output_path="final_losses_pl
 
             # Plotting
             plt.figure(figsize=(8, 6))
-            plt.bar(runs, losses, color='blue', alpha=0.7, label='Final Loss')
+            plt.plot(runs, losses, marker='o', color='blue', label='Final Loss')
+            plt.yscale('log')  # Set y-axis to exponential scale (logarithmic)
             plt.title("Final Losses Across Runs")
             plt.xlabel("Run")
-            plt.ylabel("Loss")
+            plt.ylabel("Loss (log scale)")
             plt.grid(axis='y', linestyle='--', alpha=0.7)
             plt.xticks(runs)
             plt.legend()
@@ -205,73 +450,6 @@ def plot_final_losses(file_path="final_losses.csv", output_path="final_losses_pl
         print(f"File {file_path} not found.")
     except Exception as e:
         print(f"An error occurred: {e}")
-
-
-
-# Define a flexible fit function
-def flexible_fit(x, *params):
-    """
-    Fit function combining polynomial, sinusoidal terms, and noise.
-    
-    Args:
-        x (array-like): Input data (e.g., timestamps).
-        params (list): Parameters for the model:
-            - Polynomial coefficients
-            - Amplitudes and frequencies for sinusoidal terms
-            - Noise level
-    
-    Returns:
-        array-like: Modeled data.
-    """
-    # Extract polynomial coefficients
-    poly_deg = 4 if len(params) <= 10 else 10
-    poly_coeffs = params[:poly_deg + 1]
-    
-    # Create polynomial component
-    poly_part = Polynomial(poly_coeffs)(x)
-    
-    # Extract sinusoidal terms
-    num_sinusoids = (len(params) - (poly_deg + 1)) // 3
-    sin_part = np.zeros_like(x, dtype=float)
-    for i in range(num_sinusoids):
-        amplitude = params[poly_deg + 1 + i * 3]
-        frequency = params[poly_deg + 2 + i * 3]
-        phase = params[poly_deg + 3 + i * 3]
-        sin_part += amplitude * np.sin(2 * np.pi * frequency * x + phase)
-    
-    # Add noise
-    noise_level = params[-1]
-    noise = noise_level# * np.random.normal(size=len(x))
-    
-    return poly_part + sin_part + noise
-
-
-# File paths
-INCOMING_FILE = "/media/bigdata/weather_station/weather_data.csv"
-MASTER_FILE = "/media/bigdata/weather_station/all_data.csv"
-MASTER_FILE_json = "/media/bigdata/weather_station/all_data.json"
-PLOT_ALL_TIME = "/media/bigdata/weather_station/weather_plot_all.png"
-PLOT_1_DAY = "/media/bigdata/weather_station/weather_plot_1_day.png"
-PLOT_1_HOUR = "/media/bigdata/weather_station/weather_plot_1_hour.png"
-ROLLING_AVERAGES_FILE = "/media/bigdata/weather_station/rolling_averages.csv"
-PREDICT_FILE = "/media/bigdata/weather_station/predictions.csv"
-
-
-# Ensure master file exists
-if not os.path.exists(MASTER_FILE):
-    pd.DataFrame(columns=[
-        "Timestamp", "BMP_Temperature_C", "BMP_Pressure_hPa",
-        "BMP_Altitude_m", "DHT_Temperature_C", "DHT_Humidity_percent",
-        "BH1750_Light_lx"
-    ]).to_csv(MASTER_FILE, index=False)
-
-def load_master_data(fp):
-    """Load the master data from the CSV file."""
-    data = pd.read_csv(fp, on_bad_lines='skip') 
-    data["Timestamp"] = pd.to_datetime(data["Timestamp"], errors="coerce")
-    data = data.dropna(subset=["Timestamp"])  # Drop rows with invalid timestamps
-    data = data.sort_values("Timestamp").reset_index(drop=True)
-    return data
 
 
 
@@ -297,39 +475,6 @@ def generate_json_from_csv(csv_path, json_path):
 
     except Exception as e:
         print(f"Error generating JSON file: {e}")
-
-
-def append_new_data(master_data):
-    """Append new data from the incoming file to the master DataFrame."""
-    if not os.path.exists(INCOMING_FILE):
-        print(f"Incoming file {INCOMING_FILE} does not exist. Skipping this iteration.")
-        return master_data
-
-    # Validate file type
-    file_type, encoding = mimetypes.guess_type(INCOMING_FILE)
-    if file_type != "text/csv":
-        print(f"Warning: {INCOMING_FILE} is not a text/csv file. Detected type: {file_type}")
-        return master_data
-
-    # Load incoming data
-    try:
-        incoming_data = pd.read_csv(INCOMING_FILE, encoding="utf-8", on_bad_lines="skip")
-        incoming_data["Timestamp"] = pd.to_datetime(incoming_data["Timestamp"], errors="coerce")
-        incoming_data = incoming_data.dropna(subset=["Timestamp"])
-    except Exception as e:
-        print(f"Error loading incoming data: {e}")
-        return master_data
-
-    # Concatenate and remove duplicates
-    combined_data = pd.concat([master_data, incoming_data], ignore_index=True)
-    combined_data = combined_data.drop_duplicates(subset="Timestamp").sort_values("Timestamp").reset_index(drop=True)
-
-    # Save to master file
-    combined_data.to_csv(MASTER_FILE, index=False)
-    generate_json_from_csv(MASTER_FILE, MASTER_FILE_json)
-    print(f"Appended new data and saved to {MASTER_FILE}. Total rows: {len(combined_data)}.")
-
-    return combined_data
 
 
 
@@ -372,7 +517,457 @@ def generate_summary_plot(data, output_path):
     print(f"\tSaved summary plot to {output_path}.")
 
 
-def generate_plots(data, predict_data, output_path, title):
+
+
+
+
+
+def generate_hourly_gif_with_plot(image_dir, output_gif, data):
+    """
+    Generates an animated GIF from the images in `image_dir` (from the past hour).
+    For each image, a plot (appended below the image) shows the cumulative temperature
+    and humidity data from the start of the hour (now - 1 hour) up to the image’s timestamp.
+    
+    Args:
+        image_dir (str): Directory where the .jpg images are stored.
+        output_gif (str): Path for saving the final GIF.
+        data (pd.DataFrame): DataFrame with at least these columns:
+            - "Timestamp": datetime values (assumed to be timezone-aware in UTC)
+            - "Median_Temperature_C": temperature in °C
+            - "DHT_Humidity_percent_Smoothed": humidity (%)
+    """
+    # Temporary filename (to avoid access issues)
+    temp_gif = os.path.join(os.path.dirname(output_gif), "temp.gif")
+
+    # Get current UTC time as a timezone-aware datetime
+    now = datetime.now(pytz.UTC)
+
+    # For the cumulative plot, define the starting time as one hour ago.
+    plot_start = now - timedelta(hours=1)
+
+    # Get all JPEG images (assumes naming convention: YYYYMMDD_HHMMSS.jpg)
+    image_files = sorted(glob.glob(os.path.join(image_dir, "*.jpg")))
+    
+    # Filter images from the last hour (using filename timestamps)
+    recent_images = []
+    for img in image_files:
+        try:
+            # Extract timestamp from filename (expected format: YYYYMMDD_HHMMSS)
+            img_filename = os.path.basename(img).replace(".jpg", "")
+            img_timestamp = datetime.strptime(img_filename, "%Y%m%d_%H%M%S")
+            # Localize the naive timestamp to UTC
+            img_timestamp = pytz.UTC.localize(img_timestamp)
+            if now - img_timestamp <= timedelta(hours=1):
+                recent_images.append((img, img_timestamp))
+        except ValueError:
+            continue  # Skip files with incorrect naming format
+
+    if len(recent_images) < 2:
+        print("[GIF] Not enough images to generate GIF (need at least 2). Skipping.")
+        return
+
+    print(f"[GIF] Generating GIF from {len(recent_images)} images...")
+
+    frames = []
+    # Define the Mountain Time zone (using America/Denver to account for DST)
+    mountain_tz = pytz.timezone("America/Denver")
+
+    # Loop over each image and create a composite frame
+    for img_path, timestamp in recent_images:
+        # Convert the image timestamp to Mountain Time for display
+        mountain_time = timestamp.astimezone(mountain_tz)
+
+        # Open image and perform any transforms (here, rotate 180°)
+        img = Image.open(img_path).transpose(Image.ROTATE_180)
+
+        # Add the timestamp text onto the image
+        draw = ImageDraw.Draw(img)
+        try:
+            # Adjust the font size as needed; if arial.ttf is not found, use the default font.
+            font = ImageFont.truetype("arial.ttf", 32)
+        except IOError:
+            font = ImageFont.load_default()
+        text = mountain_time.strftime("%Y-%m-%d %H:%M:%S")
+        # Position the text near the bottom-right (adjust these values as needed)
+        text_position = (img.width - 250, img.height - 50)
+        draw.text(text_position, text, font=font, fill=(255, 0, 0))
+
+        # -----
+        # Instead of plotting only a small window around the frame's timestamp,
+        # we now accumulate data from the start of the hour (plot_start) up to the frame's timestamp.
+        subset = data[(data["Timestamp"] >= plot_start) & (data["Timestamp"] <= timestamp)]
+
+        # Create the plot
+        fig, ax_temp_c = plt.subplots(figsize=(8, 4))
+        if not subset.empty:
+
+            # Plot temperature in Celsius on the primary y-axis
+            ax_temp_c.plot(subset["Timestamp"], subset["Median_Temperature_C"],
+                   color="purple", alpha=0.7, label="Temp (°C)")
+            ax_temp_c.tick_params(axis="y", labelcolor="purple")
+
+            # Add Fahrenheit scale on a secondary y-axis
+            ax_temp_f = ax_temp_c.twinx()
+            ax_temp_f.plot(subset["Timestamp"], subset["Median_Temperature_C"] * 9/5 + 32,
+                   color="orange", alpha=0.7, label="Temp (°F)")
+            ax_temp_f.set_ylabel("Temperature (°C/°F)", color="red")
+            ax_temp_f.tick_params(axis="y", labelcolor="orange")
+            ax_temp_f.yaxis.set_label_position("left")
+            ax_temp_f.yaxis.tick_left()
+
+            # Plot humidity on a third y-axis (offset the right spine so scales do not overlap)
+            ax_hum = ax_temp_c.twinx()
+            ax_hum.spines["right"]#.set_position(("outward", 60))
+            ax_hum.plot(subset["Timestamp"], subset["DHT_Humidity_percent_Smoothed"],
+                color="green", alpha=0.7, label="Humidity (%)")
+            ax_hum.set_ylabel("Humidity (%)", color="green")
+            ax_hum.tick_params(axis="y", labelcolor="green")
+
+            plot_title = (f"Data from {plot_start.astimezone(mountain_tz).strftime('%H:%M:%S')} "
+                          f"to {mountain_time.strftime('%H:%M:%S')}")
+        else:
+            # If no data is found, indicate that on the plot.
+            ax_temp_c.text(0.5, 0.5, "No data available", ha="center", va="center",
+                           transform=ax_temp_c.transAxes, fontsize=16)
+            plot_title = f"No Data around {mountain_time.strftime('%H:%M:%S')}"
+
+
+        # Create a formatter that converts to Mountain Time and formats as HH:MM:SS
+        formatter = mdates.DateFormatter('%H:%M:%S', tz=mountain_tz)
+
+        # Apply this formatter to your primary axis
+        ax_temp_c.xaxis.set_major_formatter(formatter)
+
+        ax_temp_c.set_title(plot_title)
+        ax_temp_c.set_xlabel("Time")
+        fig.autofmt_xdate()
+        plt.tight_layout()
+
+        # Save the plot to a BytesIO buffer and then open it with PIL
+        buf = BytesIO()
+        plt.savefig(buf, format="png")
+        plt.close(fig)
+        buf.seek(0)
+        plot_img = Image.open(buf)
+
+        # Resize the plot so its width matches the image width
+        if plot_img.width != img.width:
+            new_height = int(plot_img.height * img.width / plot_img.width)
+            try:
+                resample_filter = Image.Resampling.LANCZOS
+            except AttributeError:
+                resample_filter = Image.ANTIALIAS  # For older versions of Pillow
+
+            plot_img = plot_img.resize((img.width, new_height), resample_filter)
+
+        # Combine the original image (with timestamp) and the plot (stacked vertically)
+        combined_height = img.height + plot_img.height
+        combined_img = Image.new("RGB", (img.width, combined_height))
+        combined_img.paste(img, (0, 0))
+        combined_img.paste(plot_img, (0, img.height))
+
+        frames.append(combined_img)
+
+    # Save the frames as an animated GIF
+    frames[0].save(
+        temp_gif,
+        save_all=True,
+        append_images=frames[1:],
+        duration=100,  # Duration in milliseconds per frame; adjust as desired
+        loop=0
+    )
+
+    # Rename the temporary GIF to the final output path (atomic operation)
+    os.replace(temp_gif, output_gif)
+    print(f"[GIF] GIF saved to {output_gif}.")
+
+
+def detect_birds_in_images(image_dir, output_dir, confidence_threshold=0.15):
+    """
+    Detects animals (bird, squirrel, fox, rabbit) in the last 1000 images in the specified directory
+    using an ensemble of two pre-trained YOLOv5 models and saves annotated results. Each detection
+    is annotated with a red bounding box and red text showing the animal name and confidence.
+    The images are first rotated 180 degrees to correct for being upside down.
+
+    Args:
+        image_dir (str): Path to input image directory.
+        output_dir (str): Path to save output images and CSV.
+        confidence_threshold (float): Minimum confidence score for detections.
+    """
+    
+    # Create the output directory if it doesn't exist.
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Target classes of interest.
+    target_classes = ['bird', 'squirrel', 'fox', 'rabbit']
+    target_classes_names = ['Birb', 'Squiggle', 'Fox', 'Rabbit']
+
+    # Load two YOLOv5 models (assuming these models can detect the target classes).
+    try:
+        model1 = torch.hub.load('ultralytics/yolov5', 'yolov5l', pretrained=True)
+        model2 = torch.hub.load('ultralytics/yolov5', 'yolov5m', pretrained=True)
+    except Exception as e:
+        logging.error(f"Failed to load one or both YOLOv5 models: {e}")
+        return
+
+    # Get the last 1000 JPEG images from the image directory.
+    image_files = sorted(glob.glob(os.path.join(image_dir, "*.jpg")))#[-100:]
+    if not image_files:
+        logging.warning("No images found in the directory.")
+        return
+
+    logging.info(f"Processing {len(image_files)} images from {image_dir}...")
+
+    detected_image_count = 0  # Number of images containing any target detections.
+    results_list = []         # List to store detection details for CSV output.
+
+    # Set the desired large font size.
+    big_font_size = 50
+
+    # Try loading a large TrueType font.
+    try:
+        font = ImageFont.truetype("arial.ttf", big_font_size)
+    except Exception:
+        try:
+            # Try a common alternative (adjust path if needed).
+            font = ImageFont.truetype("DejaVuSans.ttf", big_font_size)
+        except Exception:
+            # Warn the user and fallback (note: load_default() is a fixed, small bitmap font).
+            logging.warning("Failed to load a large TrueType font; falling back to default (which may be too small).")
+            font = ImageFont.load_default()
+
+    # Process each image.
+    for img_path in image_files:
+        try:
+            img = Image.open(img_path).convert("RGB")
+            # Rotate the image 180 degrees to correct its orientation.
+            img = img.rotate(180, expand=True)
+        except Exception as e:
+            logging.warning(f"Skipping {img_path} due to error: {e}")
+            continue
+
+        # Run inference with both models.
+        try:
+            results1 = model1(img)
+            results2 = model2(img)
+        except Exception as e:
+            logging.error(f"Inference failed for {img_path}: {e}")
+            continue
+
+        # Get detection results as pandas DataFrames.
+        # Each DataFrame includes: xmin, ymin, xmax, ymax, confidence, class, and name.
+        df1 = results1.pandas().xyxy[0]
+        df2 = results2.pandas().xyxy[0]
+
+        # Filter detections based on confidence and target classes.
+        df1 = df1[(df1['confidence'] >= confidence_threshold) & (df1['name'].isin(target_classes))]
+        df2 = df2[(df2['confidence'] >= confidence_threshold) & (df2['name'].isin(target_classes))]
+
+        # Combine detections from both models.
+        combined_df = pd.concat([df1, df2], ignore_index=True)
+        if combined_df.empty:
+            # No target detections in this image.
+            continue
+
+        # Prepare tensors for Non-Maximum Suppression (NMS).
+        boxes = torch.tensor(combined_df[['xmin', 'ymin', 'xmax', 'ymax']].values, dtype=torch.float32)
+        scores = torch.tensor(combined_df['confidence'].values, dtype=torch.float32)
+        # Overlap threshold for NMS.
+        nms_threshold = 0.95
+
+        # Apply NMS to fuse overlapping detections.
+        keep_indices = nms(boxes, scores, nms_threshold)
+        fused_detections = combined_df.iloc[keep_indices.numpy()]
+
+        # Annotate the image if there are any fused detections.
+        if not fused_detections.empty:
+            detected_image_count += 1
+            draw = ImageDraw.Draw(img)
+
+            for _, row in fused_detections.iterrows():
+                box = [row['xmin'], row['ymin'], row['xmax'], row['ymax']]
+                confidence = row['confidence']
+                label = f"{row['name']}: {confidence:.2f}"
+
+                # Draw the red bounding box.
+                draw.rectangle(box, outline='red', width=3)
+                # Draw red text near the bottom-left corner of the box.
+                text_position = (row['xmin'], row['ymax'])
+                draw.text(text_position, label, fill='red', font=font)
+
+                # Append detection details for CSV output.
+                results_list.append({
+                    "image": os.path.basename(img_path),
+                    "class": row['name'],
+                    "xmin": row['xmin'],
+                    "ymin": row['ymin'],
+                    "xmax": row['xmax'],
+                    "ymax": row['ymax'],
+                    "confidence": confidence
+                })
+
+            # Save the annotated image.
+            output_path = os.path.join(output_dir, os.path.basename(img_path))
+            try:
+                img.save(output_path)
+                logging.info(f"Detection(s) found. Saved annotated image: {output_path}")
+            except Exception as e:
+                logging.error(f"Failed to save image {output_path}: {e}")
+
+    # Save the aggregated detection results to CSV.
+    if results_list:
+        results_df = pd.DataFrame(results_list)
+        csv_path = os.path.join(output_dir, "animal_detections.csv")
+        try:
+            results_df.to_csv(csv_path, index=False)
+            logging.info(f"Detection results saved to {csv_path}")
+        except Exception as e:
+            logging.error(f"Failed to save CSV file: {e}")
+    else:
+        logging.info("No target animals detected in any images.")
+
+    logging.info(f"Detection complete. {detected_image_count} images contained target animals.")
+
+
+
+def detect_birds_in_images_gif(image_dir, output_dir, confidence_threshold=0.15, log_file="processed_images.json"):
+    os.makedirs(output_dir, exist_ok=True)
+    
+    target_classes = ['bird', 'squirrel', 'fox', 'rabbit']
+
+    # Load YOLOv5 models (or any other detection model)
+    try:
+        model1 = torch.hub.load('ultralytics/yolov5', 'custom', path='yolov5m.pt', force_reload=True)
+        model2 = torch.hub.load('ultralytics/yolov5', 'custom', path='yolov5l.pt', force_reload=True)
+    except Exception as e:
+        logging.error(f"Failed to load models: {e}")
+        return  # Exit function if models cannot be loaded
+
+    # Get all JPEG images (assumes naming convention: YYYYMMDD_HHMMSS.jpg)
+    image_files = sorted(glob.glob(os.path.join(image_dir, "*.jpg")))
+
+    # Extract timestamps from filenames and store them with the file paths
+    timestamps = []
+    for img in tqdm(image_files, desc="Extracting timestamps", unit="file"):
+        try:
+            img_filename = os.path.basename(img).replace(".jpg", "")
+            img_timestamp = datetime.strptime(img_filename, "%Y%m%d_%H%M%S")
+            img_timestamp = pytz.UTC.localize(img_timestamp)  # Localize to UTC
+            timestamps.append((img, img_timestamp))
+        except ValueError:
+            continue  # Skip files with incorrect naming format
+
+    # Determine 'now' as the most recent image timestamp
+    if timestamps:
+        timestamps.sort(key=lambda x: x[1])  # Sort by timestamp
+        now = timestamps[-1][1]  # Most recent timestamp
+        then = timestamps[0][1]  # Most recent timestamp
+    else:
+        now = datetime.now(pytz.UTC)  # Default to actual UTC time if no images
+
+    # Define the start time as one hour before the most recent image
+    plot_start = now - timedelta(hours=1)
+
+    # Filter images from the last hour
+    new_images = [(img, ts) for img, ts in timestamps if ts >= plot_start]
+
+    # Print results for verification
+    print(f"Most recent image timestamp (now): {now}")
+    print(f"Oldest image timestamp being processed: {then}")
+    print(f"Number of images in the last hour: {len(new_images)}")
+
+    if not new_images:
+        logging.info("No new images to process.")
+        return
+    
+    logging.info(f"Processing {len(new_images)} new images...")
+    results_list = []
+    detected_image_count = 0
+    consecutive_bird_images = []
+    
+    try:
+        font = ImageFont.truetype("arial.ttf", 50)
+    except:
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", 50)
+        except:
+            logging.warning("Failed to load TrueType font, falling back to default.")
+            font = ImageFont.load_default()
+    
+
+
+    for i, (img_path, img_timestamp) in tqdm(enumerate(new_images)): 
+        try:
+            img = Image.open(img_path).convert("RGB").rotate(180, expand=True)
+        except Exception as e:
+            logging.warning(f"Skipping {img_path} due to error: {e}")
+            continue
+        
+        try:
+            results1 = model1(img)
+            results2 = model2(img)
+        except Exception as e:
+            logging.error(f"Inference failed for {img_path}: {e}")
+            continue
+        
+        df1 = results1.pandas().xyxy[0]
+        df2 = results2.pandas().xyxy[0]
+        
+        df1 = df1[(df1['confidence'] >= confidence_threshold) & (df1['name'].isin(target_classes))]
+        df2 = df2[(df2['confidence'] >= confidence_threshold) & (df2['name'].isin(target_classes))]
+        
+        combined_df = pd.concat([df1, df2], ignore_index=True)
+        if combined_df.empty:
+            if len(consecutive_bird_images) > 1:
+                middle_idx = len(consecutive_bird_images) // 2
+                middle_image_name = os.path.basename(new_images[i - middle_idx])
+                gif_name = f"{middle_image_name[:-4]}.gif"
+                gif_path = os.path.join(output_dir, gif_name)
+                consecutive_bird_images[0].save(gif_path, save_all=True, append_images=consecutive_bird_images[1:], duration=100, loop=0)
+                logging.info(f"Saved GIF: {gif_path}")
+            elif len(consecutive_bird_images) == 1:
+                single_img_name = os.path.basename(new_images[i - 1])
+                single_img_path = os.path.join(output_dir, single_img_name)
+                consecutive_bird_images[0].save(single_img_path)
+                logging.info(f"Saved single image: {single_img_path}")
+            consecutive_bird_images = []
+            continue
+        
+        boxes = torch.tensor(combined_df[['xmin', 'ymin', 'xmax', 'ymax']].values, dtype=torch.float32)
+        scores = torch.tensor(combined_df['confidence'].values, dtype=torch.float32)
+        keep_indices = nms(boxes, scores, 0.95)
+        fused_detections = combined_df.iloc[keep_indices.numpy()]
+        
+        if not fused_detections.empty:
+            detected_image_count += 1
+            draw = ImageDraw.Draw(img)
+            
+            for _, row in fused_detections.iterrows():
+                box = [row['xmin'], row['ymin'], row['xmax'], row['ymax']]
+                label = f"{row['name']}: {row['confidence']:.2f}"
+                draw.rectangle(box, outline='red', width=3)
+                draw.text((row['xmin'], row['ymax']), label, fill='red', font=font)
+                
+                results_list.append({
+                    "image": os.path.basename(img_path),
+                    "class": row['name'],
+                    "xmin": row['xmin'],
+                    "ymin": row['ymin'],
+                    "xmax": row['xmax'],
+                    "ymax": row['ymax'],
+                    "confidence": row['confidence']
+                })
+            
+            consecutive_bird_images.append(img)
+    
+    if results_list:
+        pd.DataFrame(results_list).to_csv(os.path.join(output_dir, "animal_detections.csv"), index=False)
+
+    logging.info(f"Detection complete. {detected_image_count} new images contained target animals.")
+
+
+
+def generate_plots(data, predict_data, output_path, title, out_of_date_flag):
     """Generate a 4x4 subplot for temperature, humidity, pressure, and light with additional calculated metrics."""
     # Convert timestamps to Mountain Time
     mountain_tz = pytz.timezone("America/Denver")
@@ -381,26 +976,26 @@ def generate_plots(data, predict_data, output_path, title):
     altitude_m = data["BMP_Altitude_m"]
     # Calculate median temperature
 
+    # Replace NaNs and Infs in all numeric columns
+    data.replace([np.inf, -np.inf], np.nan, inplace=True)
+    data.dropna(inplace=True)
 
     # Convert temperatures to Fahrenheit
     data["BMP_Temperature_F"] = data["BMP_Temperature_C"] * 9 / 5 + 32
     data["DHT_Temperature_F"] = data["DHT_Temperature_C"] * 9 / 5 + 32
 
 
+    # Ensure the Timestamp column is clean and valid
+    if "Timestamp" in data.columns:
+        data = data.dropna(subset=["Timestamp"])  # Drop rows with missing timestamps
+        if not pd.api.types.is_datetime64_any_dtype(data["Timestamp"]):
+            # Convert to datetime if not already in the correct format
+            data["Timestamp"] = pd.to_datetime(data["Timestamp"], errors="coerce")
+        data = data.dropna(subset=["Timestamp"])  # Drop rows with invalid timestamps
+
+
     timestamps = np.arange(len(data["Timestamp"]))
-    humidity = data["DHT_Humidity_percent"].values
-    if len(timestamps) > 10:
-        poly = Polynomial.fit(timestamps, humidity, deg=min(10, len(timestamps) - 1))
-    if len(timestamps) < 100:
-        poly = Polynomial.fit(timestamps, humidity, deg=min(4, len(timestamps) - 1))
-    if len(timestamps) > 10:
-        poly = Polynomial.fit(timestamps, humidity, deg=min(20, len(timestamps) - 1))
-        
-    smooth_timestamps = np.linspace(0, len(timestamps) - 1, len(timestamps))
-    smooth_humidity = poly(smooth_timestamps)
-
-
-
+    smooth_humidity = data["DHT_Humidity_percent_Smoothed"].values
 
     # Heat Index Calculation
     T = data["DHT_Temperature_F"]
@@ -451,13 +1046,20 @@ def generate_plots(data, predict_data, output_path, title):
     data["ECI"] = np.clip(ECI, 0, 1)
     
     fig, axs = plt.subplots(4, 2, figsize=(15, 15))
+    
 
     # Calculate the maximum length allowed for predicted data (1/4th of the main data length)
     max_predicted_length = len(data["Timestamp"]) // 4
 
-    # Ensure predicted data is limited to the specified length
-    if len(predict_data) > max_predicted_length:
-        predict_data = predict_data.iloc[:max_predicted_length]
+    # Find the starting index of the predictions after the real data
+    start_index = predict_data["Timestamp"].searchsorted(data["Timestamp"].iloc[-2], side="right")
+
+    # Ensure predicted data starts immediately after the real data and is limited to the specified length
+    predict_data_subset = predict_data.iloc[start_index:start_index + max_predicted_length]
+
+    # Find overlapping predicted data (predictions before the end of the real data)
+    overlap_index = predict_data["Timestamp"].searchsorted(data["Timestamp"].iloc[-2], side="left")
+    predict_data_overlap = predict_data.iloc[:overlap_index]
 
     # Temperature Plot
     ax1 = axs[0, 0]
@@ -465,10 +1067,8 @@ def generate_plots(data, predict_data, output_path, title):
     ax1.plot(data["Timestamp"], data["DHT_Temperature_C"], color="cyan", alpha=0.1)
     ax1.plot(data["Timestamp"], data["BMP_Temperature_Smoothed"], label="BMP Temp", color="blue", alpha=0.7)
     ax1.plot(data["Timestamp"], data["DHT_Temperature_Smoothed"], label="DHT Temp", color="cyan", alpha=0.7)    
-    ax1.plot(predict_data["Timestamp"], predict_data["Predicted_Temperature"], label="Predicted Temp", color="royalblue", alpha=0.7)
-
+    ax1.plot(predict_data_subset["Timestamp"], predict_data_subset["Predicted_Temperature"], label="Predicted Temp", color="royalblue", alpha=0.7)
     ax1.plot(data["Timestamp"], data["Median_Temperature_C"], color="magenta", linestyle="--")
-
     ax1.set_title("Temperature")
     ax1.set_ylabel("Temperature (°C)")
     ax1.legend(loc="upper left")
@@ -485,14 +1085,13 @@ def generate_plots(data, predict_data, output_path, title):
     # Humidity Plot with Cubic Spline
     ax2 = axs[0, 1]
     ax2.plot(data["Timestamp"], data["DHT_Humidity_percent"], color="green", alpha=0.01)
-    ax2.plot(data["Timestamp"], data["DHT_Humidity_percent_poly"], label="Fitted Polynomial", color="green", linestyle="-", alpha = 0.4)
     ax2.plot(data["Timestamp"], data["DHT_Humidity_percent_Smoothed"], color="green",  label="Humidity (%)", alpha=0.7)
 
     ax2.set_title("Humidity")
     ax2.set_ylabel("Humidity (%)")
     ax2.legend()
     ax2.grid()
-    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.0f}"))
+    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.2f}"))
     
 
 
@@ -593,8 +1192,13 @@ def generate_plots(data, predict_data, output_path, title):
     ax3.grid()
 
     # Calculate combined min and max for consistent y-axis scaling
-    combined_min = data["Dew_Point_C"].min()
-    combined_max = data["Dew_Point_C"].max()
+    combined_min = data["Dew_Point_C"].min(skipna=True)
+    combined_max = data["Dew_Point_C"].max(skipna=True)
+
+    # Validate the calculated limits
+    if pd.isna(combined_min) or pd.isna(combined_max):
+        print("Warning: Dew Point data contains invalid values. Setting default axis limits.")
+        combined_min, combined_max = -10, 40  # Default range (customize as needed)
 
     # Add margins to the limits
     if combined_min < 0:
@@ -607,10 +1211,12 @@ def generate_plots(data, predict_data, output_path, title):
     else:
         combined_max *= 1.1
 
+    # Safeguard: Ensure valid axis limits are applied
+    if combined_min >= combined_max:
+        print("Warning: Invalid axis limits calculated. Setting fallback limits.")
+        combined_min, combined_max = -10, 40  # Default range
+
     ax3.set_ylim(combined_min, combined_max)
-
-
-
 
     # Specific Humidity Plot
     ax5 = axs[3, 0]
@@ -644,18 +1250,35 @@ def generate_plots(data, predict_data, output_path, title):
     cbar = plt.colorbar(line, ax=ax6, orientation="vertical", pad=0.02)
     cbar.set_label("Environmental Comfort Index (ECI)")
 
+
+
+
+
     # Axis formatting
     ax6.set_title("Environmental Comfort Index")
     ax6.set_ylabel("ECI")
     ax6.grid()
-    ax6.set_xlim(data["Timestamp"].min(), data["Timestamp"].max())
-    ax6.set_ylim(data["ECI"].min(), data["ECI"].max())
 
     # Formatting
     for ax in axs.flat:
         ax.xaxis.set_tick_params(rotation=45)
 
     fig.suptitle(title, fontsize=16)
+
+    if out_of_date_flag == 1:
+        # Add the warning in big red text
+        warning_text = "!!! WARNING: FILE IS OUT OF DATE !!!"
+        fig.text(
+            0.5, 0.92,  # Position: x=0.5 (centered), y=0.92 (below the title)
+            warning_text,
+            color="red",
+            fontsize=14,
+            ha="center",
+            va="center",
+            fontweight="bold"
+        )
+
+    
     fig.tight_layout(rect=[0, 0, 1, 0.96])  # Adjust layout for the title
     plt.savefig(output_path)
     plt.close()
@@ -761,8 +1384,6 @@ def calculate_rolling_averages(data, time_spans):
 
 def plot_system_metrics(csv_file_path, output_image_path):
 
-
-
     """
     Reads a CSV file containing system metrics, plots the data with dual y-axes, 
     and saves the plot as an image.
@@ -775,9 +1396,11 @@ def plot_system_metrics(csv_file_path, output_image_path):
     data = pd.read_csv(csv_file_path)
 
     # Convert the 'Timestamp' column to datetime format
-    data['Timestamp'] = pd.to_datetime(data['Timestamp'])
     data = data.dropna(subset=["Timestamp"])  # Drop rows with invalid timestamps
     data = data.sort_values("Timestamp").reset_index(drop=True)
+    mountain_tz = pytz.timezone("America/Denver")
+    #data["Timestamp"] = data["Timestamp"].dt.tz_convert(mountain_tz)
+    data['Timestamp'] = pd.to_datetime(data['Timestamp'], format="%Y-%m-%d_%H-%M-%S", errors="coerce")
 
     # Create the plot
     fig, ax1 = plt.subplots(figsize=(12, 6))
@@ -825,134 +1448,167 @@ def plot_system_metrics(csv_file_path, output_image_path):
 
 
 
-def plot_system_stats(csv_file, output_image="system_stats_plot.png"):
+def clean_percentage(series):
+    """Clean percentage data by removing '%' and converting to float."""
+    return series.str.rstrip('%').astype(float)
+    
+    
+
+def parse_disk_usage(disk_usage_str):
+    """Parse multiple disk usage entries and compute total used and total disk space in GB."""
+    try:
+        if not isinstance(disk_usage_str, str):
+            return 0.0, 0.0
+
+        total_used = 0.0
+        total_capacity = 0.0
+
+        # Regex to match disk usage entries in the format <used>GB/<total>GB
+        disk_pattern = re.compile(r'([\d.]+)GB/([\d.]+)GB')
+
+        # Find all matches in the string
+        matches = disk_pattern.findall(disk_usage_str)
+
+        for used, capacity in matches:
+            try:
+                total_used += float(used)
+                total_capacity += float(capacity)
+            except ValueError as e:
+                print(f"Skipping malformed entry: used={used}, capacity={capacity} - {e}")
+                continue
+
+        return total_used, total_capacity
+    except Exception as e:
+        print(f"Error parsing disk usage string: {disk_usage_str} - {e}")
+        return 0.0, 0.0
+
+
+def plot_system_stats(csv_file, output_image="system_stats_plot_improved.png"):
+    """Plots system stats from the CSV file and saves as an image."""
+    # Load data
+    df = pd.read_csv(csv_file, parse_dates=["Timestamp"])
+
+    # Clean percentage columns
+    for col in ["CPU Usage (%)", "Memory Usage (%)", "GPU Usage (%)", "GPU Memory Usage (%)"]:
+        df[col] = clean_percentage(df[col])
+
+    # Extract Disk Usage Data
+    disk_totals = df["Disk Usage"].apply(parse_disk_usage)
+    df["Disk Used (GB)"], df["Disk Total (GB)"] = zip(*disk_totals)
+
+    # Extract Net Disk I/O
+    net_io = df["Net Disk I/O (MB)"].str.extract(r"Read: ([\d.]+)MB, Write: ([\d.]+)MB").astype(float)
+    df["Disk Read (MB)"], df["Disk Write (MB)"] = net_io[0], net_io[1]
+
+    # Initialize subplots
+    fig, axes = plt.subplots(4, 2, figsize=(18, 14))
+    fig.suptitle("System Statistics", fontsize=20)
 
     time_formatter = DateFormatter("%H:%M")
 
-
-    # Load data from the CSV file
-    df = pd.read_csv(csv_file, parse_dates=["Timestamp"])
-    
-    # Initialize a multi-panel plot
-    fig, axes = plt.subplots(3, 2, figsize=(15, 10))
-    fig.suptitle("System Stats", fontsize=16)
-
-    # Plot CPU usage and temperature
+    # Plot CPU usage and memory usage
     ax1 = axes[0, 0]
     ax1.plot(df["Timestamp"], df["CPU Usage (%)"], label="CPU Usage (%)", color="blue")
-    ax1.set_ylabel("CPU Usage (%)")
-    ax1.set_xlabel("Timestamp")
-    ax1.set_title("CPU Usage and Memory")
-    ax1.grid()
-    ax1.legend(loc="upper left")
     ax1_twin = ax1.twinx()
-    ax1_twin.plot(df["Timestamp"], df["Memory Usage (%)"], label="CPU Memory (%)", color="red")
-    ax1_twin.set_ylabel("CPU Memory Usage (%)")
+    ax1_twin.plot(df["Timestamp"], df["Memory Usage (%)"], label="Memory Usage (%)", color="red")
+    ax1.set_title("CPU and Memory Usage", fontsize=12)
+    ax1.set_ylabel("CPU Usage (%)", color="blue")
+    ax1_twin.set_ylabel("Memory Usage (%)", color="red")
+    ax1.set_xlabel("Timestamp")
+    ax1.legend(loc="upper left")
     ax1_twin.legend(loc="upper right")
+    ax1.grid()
 
-    # Plot GPU temperature
+    # Plot CPU temperature
     ax2 = axes[0, 1]
-    ax2.plot(df["Timestamp"], df["CPU Temp (°C)"], label="CPU Temp (°C)", color="green")
-    ax2.set_ylabel("CPU Temp (°C)")
+    ax2.plot(df["Timestamp"], df["CPU Temp (\u00b0C)"].str.rstrip("\u00b0C").astype(float), label="CPU Temp (\u00b0C)", color="green")
+    ax2.set_title("CPU Temperature", fontsize=12)
+    ax2.set_ylabel("Temperature (\u00b0C)")
     ax2.set_xlabel("Timestamp")
-    ax2.set_title("CPU Temperature")
+    ax2.legend(loc="upper left")
     ax2.grid()
-    ax2.legend(loc="upper right")
 
     # Plot GPU usage and memory usage
     ax3 = axes[1, 0]
     ax3.plot(df["Timestamp"], df["GPU Usage (%)"], label="GPU Usage (%)", color="purple")
-    ax3.set_ylabel("GPU Usage (%)")
-    ax3.set_xlabel("Timestamp")
-    ax3.set_title("GPU Usage and Memory")
-    ax3.grid()
-    ax3.legend(loc="upper left")
     ax3_twin = ax3.twinx()
-    ax3_twin.plot(df["Timestamp"], df["GPU Memory Usage (%)"], label="GPU Memory (%)", color="orange")
-    ax3_twin.set_ylabel("GPU Memory Usage (%)")
+    ax3_twin.plot(df["Timestamp"], df["GPU Memory Usage (%)"], label="GPU Memory Usage (%)", color="orange")
+    ax3.set_title("GPU Usage and Memory", fontsize=12)
+    ax3.set_ylabel("GPU Usage (%)", color="purple")
+    ax3_twin.set_ylabel("GPU Memory Usage (%)", color="orange")
+    ax3.set_xlabel("Timestamp")
+    ax3.legend(loc="upper left")
     ax3_twin.legend(loc="upper right")
+    ax3.grid()
 
     # Plot GPU temperature
     ax4 = axes[1, 1]
-    ax4.plot(df["Timestamp"], df["GPU Temp (°C)"], label="GPU Temp (°C)", color="brown")
-    ax4.set_ylabel("GPU Temp (°C)")
+    ax4.plot(df["Timestamp"], df["GPU Temp (\u00b0C)"].str.rstrip("\u00b0C").astype(float), label="GPU Temp (\u00b0C)", color="brown")
+    ax4.set_title("GPU Temperature", fontsize=12)
+    ax4.set_ylabel("Temperature (\u00b0C)")
     ax4.set_xlabel("Timestamp")
-    ax4.set_title("GPU Temperature")
+    ax4.legend(loc="upper left")
     ax4.grid()
-    ax4.legend(loc="upper right")
 
-    # Plot HDD usage
+    # Plot Disk Usage
     ax5 = axes[2, 0]
-    hdd_usage_series = df["HDD Usage"].apply(
-        lambda x: sum(int(val.split("=")[1]) for val in x.split(", "))
-    )
-    ax5.plot(df["Timestamp"], hdd_usage_series/(1024 * 1024 * 1024 * 1024), label="HDD Usage (Bytes)", color="cyan")
-    ax5.set_ylabel("HDD Usage (TB)")
+    ax5.plot(df["Timestamp"], df["Disk Used (GB)"]/1024, label="Disk Used (TB)", color="cyan")
+    ax5.plot(df["Timestamp"], df["Disk Total (GB)"]/1024, label="Disk Total (TB)", color="black", linestyle="dashed")
+    ax5.set_title("Disk Usage", fontsize=12)
+    ax5.set_ylabel("Disk Space (TB)")
     ax5.set_xlabel("Timestamp")
-    ax5.set_title("HDD Usage")
+    ax5.legend(loc="upper left")
     ax5.grid()
-    ax5.legend(loc="upper right")
 
 
 
+    # Compute deltas for Disk Read and Write
+    df["Disk Read Delta (MB)"] = df["Disk Read (MB)"].diff().fillna(0)
+    df["Disk Write Delta (MB)"] = df["Disk Write (MB)"].diff().fillna(0)
+
+    # Plot Net Disk I/O Delta
     ax6 = axes[2, 1]
-    if "Other Temperatures" in df.columns:
-        # Handle NaN or float values safely
-        other_temps_series = df["Other Temperatures"].apply(
-            lambda x: sum(
-                float(val.split("=")[1])
-                for val in str(x).split(", ")
-                if "=" in val and val.split("=")[1].replace('.', '', 1).isdigit()
-            )
-            if isinstance(x, str) or not pd.isna(x)
-            else 0
-        )
-        ax6.plot(df["Timestamp"], other_temps_series, label="Other Temperatures (°C)", color="magenta")
-        ax6.set_ylabel("Other Temperatures (°C)")
-    else:
-        ax6.text(0.5, 0.5, "No Data Available", ha="center", va="center", fontsize=12)
-
+    ax6.plot(df["Timestamp"], df["Disk Read Delta (MB)"], label="Disk Read Delta (MB)", color="magenta")
+    ax6.plot(df["Timestamp"], df["Disk Write Delta (MB)"], label="Disk Write Delta (MB)", color="orange")
+    ax6.set_title("Net Disk I/O Delta", fontsize=12)
+    ax6.set_ylabel("Data (MB)")
     ax6.set_xlabel("Timestamp")
-    ax6.set_title("Other Temperatures")
+    ax6.legend(loc="upper left")
     ax6.grid()
-    ax6.legend(loc="upper right")
+
+    # Set y-axis to powers of 10
+    ax6.set_yscale('log')  # Logarithmic scale
+    ax6.yaxis.set_major_locator(ticker.LogLocator(base=10.0))  # Major ticks at powers of 10
+    ax6.yaxis.set_minor_locator(ticker.LogLocator(base=10.0, subs="auto", numticks=10))  # Minor ticks between
+    ax6.yaxis.set_minor_formatter(ticker.NullFormatter())  # Hide minor tick labels for clarity
 
 
+    # Plot other temperatures (Thermals)
+    ax7 = axes[3, 0]
+    if "Thermals" in df.columns and not df["Thermals"].isnull().all():
+        df["Thermals"] = df["Thermals"].fillna("").astype(str)
+        thermals = df["Thermals"].str.extractall(r"([\w\s]+)=([\d.]+)").reset_index()
+        thermals_pivot = thermals.pivot(index="level_0", columns=0, values=1).apply(pd.to_numeric, errors="coerce")
+        for col in thermals_pivot:
+            ax7.plot(df["Timestamp"], thermals_pivot[col], label=col)
+    else:
+        ax7.text(0.5, 0.5, "No Thermal Data Available", ha="center", va="center", fontsize=12)
+    ax7.set_title("Other Temperatures", fontsize=12)
+    ax7.set_ylabel("Temperature (\u00b0C)")
+    ax7.set_xlabel("Timestamp")
+    ax7.legend(loc="upper left")
+    ax7.grid()
 
-    # Plot CPU usage and temperature
-    ax1.set_xlabel("Timestamp")
-    ax1.xaxis.set_major_formatter(DateFormatter("%H:%M"))
+    # Remove empty subplot
+    axes[3, 1].axis('off')
 
-    # Plot GPU temperature
-    ax3.set_xlabel("Timestamp")
-    ax3.xaxis.set_major_formatter(DateFormatter("%H:%M"))
-
-    # Plot GPU usage and memory usage
-    ax2.set_xlabel("Timestamp")
-    ax2.xaxis.set_major_formatter(DateFormatter("%H:%M"))
-
-    # Plot GPU temperature
-    ax4.set_xlabel("Timestamp")
-    ax4.xaxis.set_major_formatter(DateFormatter("%H:%M"))
-
-    # Plot HDD usage
-    ax5.set_xlabel("Timestamp")
-    ax5.xaxis.set_major_formatter(DateFormatter("%H:%M"))
-
-    # Plot other temperatures
-    ax6.set_xlabel("Timestamp")
-    ax6.xaxis.set_major_formatter(DateFormatter("%H:%M"))
-
-
-
-
-    # Adjust layout and save the figure
+    # Adjust layout
+    for ax in axes.flat:
+        ax.xaxis.set_major_formatter(time_formatter)
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.savefig(output_image)
     plt.close()
-    print(f"Plot saved as {output_image}")
-
-
+    print(f"Improved plot saved as {output_image}")
 
 
 def calculate_dew_point(temp_c, humidity, pressure_hpa):
@@ -1002,16 +1658,28 @@ def construct_time_spans(directory="."):
     now = datetime.now()
     file_mod_times = get_file_modification_times(directory)
     time_spans = {}
+    #print(file_mod_times)
+    if any((now - mod_time) > timedelta(hours=2) for mod_time in file_mod_times):
+        time_spans["all_time"] = timedelta(days=3650)
+        
+    if any((now - mod_time) > timedelta(days=1) for mod_time in file_mod_times):
+        time_spans["1_year"] = timedelta(days=365)  # Effectively no limit    
+        time_spans["1_month"] = timedelta(weeks=4)  # Effectively no limit                    
+        
+    if any((now - mod_time) > timedelta(minutes=30) for mod_time in file_mod_times):
+        time_spans["1_hour"] = timedelta(hours=1)
+        
+    if any((now - mod_time) > timedelta(hours=1) for mod_time in file_mod_times):
+        time_spans["1_day"] = timedelta(days=1)
+
 
     time_spans["all_time"] = timedelta(days=3650)
+    #time_spans["1_year"] = timedelta(days=365),  # Effectively no limit    
+    #time_spans["1_month"] = timedelta(weeks=4),  # Effectively no limit       
+    #time_spans["1_day"] = timedelta(days=1)
+    #time_spans["1_hour"] = timedelta(hours=1)
     time_spans["10_minutes"] = timedelta(minutes=10)  # Always add 10 minutes
-    time_spans["1_hour"] = timedelta(hours=1)
-    time_spans["1_day"] = timedelta(days=1)
-
-    if any((now - mod_time) > timedelta(days=1) for mod_time in file_mod_times):
-        time_spans["1_year"] = timedelta(days=365),  # Effectively no limit    
-        time_spans["1_month"] = timedelta(weeks=4),  # Effectively no limit                    
-
+          
     return time_spans
 
 
@@ -1019,11 +1687,16 @@ def construct_time_spans(directory="."):
 def main():
     print("Starting server weather processing script...")
 
+    temp_offset =  - 2.3
+
+    # Define image directory and output path for GIF
+    IMAGE_DIR = "/media/bigdata/weather_station/images/"
+    GIF_OUTPUT = "/media/bigdata/weather_station/hourly_timelapse.gif"
+
+
     local_stats_file = "my_pc_stats.csv"
-    #initialize_csv(local_stats_file)
+    initialize_csv(local_stats_file)
     gather_system_stats(local_stats_file)
-    gather_system_stats(local_stats_file)
-    plot_system_stats("my_pc_stats.csv", "system_stats_plot.png")
 
     # Example usage
     time_spans = construct_time_spans()
@@ -1033,23 +1706,23 @@ def main():
     print("Reloading master file...")
 
     print("Making loss and system metric plots...")
-    plot_training_loss("training_loss.csv", "training_loss_plot.png")
-    plot_final_losses("final_losses.csv", "final_losses_plot.png")
+    print("\t Making server stats plots...")
+    plot_system_stats("my_pc_stats.csv", "system_stats_plot.png")
+    print("\t Making RPi stats plots...")
     plot_system_metrics("system_usage.csv", "system_metrics_plot.png")
 
 
     print("Appending new data...")
     master_data = load_master_data(MASTER_FILE)
-    master_data = append_new_data(master_data)
+    #master_data = append_new_data(master_data)
     master_data.loc[master_data["BMP_Temperature_C"] < 0, "DHT_Temperature_C"] *= -1
-                          
+    master_data["DHT_Temperature_C"] = master_data["DHT_Temperature_C"] + temp_offset
+    master_data["BMP_Temperature_C"] = master_data["BMP_Temperature_C"] + temp_offset
 
-    print("Running temp inference...")
-
-    forecaster = WeatherForecaster(master_file=MASTER_FILE, num_layers=6, batch_size=256, target_seq_length=3600)
+    forecaster = WeatherForecaster(master_file=MASTER_FILE, input_dim=48, hidden_dim=128, num_layers=6, batch_size=256, target_seq_length=3600)
     # Define the model file path
     model_path = "/media/bigdata/weather_station/weather_model.pth"
-
+    #forecaster.train_model(epochs=2);forecaster.save_model(model_path)
     # Check if the model file exists and is recent
     if os.path.exists(model_path):
         # Get the last modification time of the file
@@ -1059,6 +1732,8 @@ def main():
             print("Model file is older than a day. Retraining the model...")
             forecaster.train_model(epochs=300)
             forecaster.save_model(model_path)
+            plot_training_loss("training_loss.csv", "training_loss_plot.png")
+            plot_final_losses("final_losses.csv", "final_losses_plot.png")
         else:
             print("Model file is up-to-date. Loading the model...")
             forecaster.load_model(model_path)
@@ -1067,49 +1742,41 @@ def main():
         forecaster.train_model(epochs=300)
         forecaster.save_model(model_path)
 
-    # Proceed with inference
-    steps_ahead = 600
-    recent_data = forecaster.load_master_data()
-    timestamps = pd.to_datetime(recent_data["Timestamp"])  # Convert to datetime
-    last_timestamp = timestamps.iloc[-1]  # The most recent timestamp
 
-    data = recent_data[["DHT_Humidity_percent", "BMP_Temperature_C", "BMP_Pressure_hPa"]].values
-    seq_length = forecaster.seq_length
 
-    # Scale recent data using the training scale
-    last_sequence = data[-forecaster.seq_length:]
-    last_sequence[:, 1] = ((last_sequence[:, 1] - forecaster.temp_min) / (forecaster.temp_max - forecaster.temp_min))
-    last_sequence[:, 0] = ((last_sequence[:, 0] - forecaster.hum_min) / (forecaster.hum_max - forecaster.hum_min))
-    last_sequence[:, 2] = ((last_sequence[:, 2] - forecaster.pres_min) / (forecaster.pres_max - forecaster.pres_min))
+    file_infer_time = datetime.fromtimestamp(os.path.getmtime(PREDICT_FILE))
+    if True:#datetime.now() - file_infer_time > timedelta(minutes=9):
+        print("Running temp inference...")
+        # Proceed with inference
+        steps_ahead = 6000
+        recent_data = forecaster.load_master_data()
+        timestamps = pd.to_datetime(recent_data["Timestamp"])  # Convert to datetime
+        last_timestamp = timestamps.iloc[-1]  # The most recent timestamp
+        data = recent_data[["DHT_Humidity_percent", "BMP_Temperature_C", "BMP_Pressure_hPa"]].values
+        seq_length = forecaster.seq_length
+        # Scale recent data using the training scale
+        last_sequence = data[-forecaster.seq_length:]
+        #last_sequence[:, 1] = ((last_sequence[:, 1] - forecaster.temp_min) / (forecaster.temp_max - forecaster.temp_min))
+        #last_sequence[:, 0] = ((last_sequence[:, 0] - forecaster.hum_min) / (forecaster.hum_max - forecaster.hum_min))
+        #last_sequence[:, 2] = ((last_sequence[:, 2] - forecaster.pres_min) / (forecaster.pres_max - forecaster.pres_min))
+        # Prepare recent sequence
 
-    # Prepare recent sequence
-    recent_sequence = torch.tensor(last_sequence, dtype=torch.float32).unsqueeze(0).to(forecaster.device)
+        predictions = forecaster.predict_future(last_sequence, steps_ahead=steps_ahead)
+        # Infer future timestamps
+        interval_seconds = (timestamps.iloc[-1] - timestamps.iloc[-2]).total_seconds()
+        future_timestamps = forecaster.infer_timestamps(last_timestamp, steps_ahead, interval_seconds)
+        # Save predictions to CSV
+        forecaster.save_predictions_to_csv(predictions, future_timestamps, PREDICT_FILE)
 
-    # Predict future temperatures
-    predictions = forecaster.predict_future(recent_sequence, steps_ahead=steps_ahead)
-
-    # Infer future timestamps
-    interval_seconds = (timestamps.iloc[-1] - timestamps.iloc[-2]).total_seconds()
-    future_timestamps = forecaster.infer_timestamps(last_timestamp, steps_ahead, interval_seconds)
-
-    # Save predictions to CSV
-    forecaster.save_predictions_to_csv(predictions, future_timestamps, "/media/bigdata/weather_station/predictions.csv")
 
     predict_data = load_master_data(PREDICT_FILE)
-
-    
+    predict_data["Predicted_Temperature"] = predict_data["Predicted_Temperature"] + temp_offset
     rolling_window = 10
-        
     timestamps = np.arange(len(master_data["Timestamp"]))
     humidity = master_data["DHT_Humidity_percent"].values
-
-    poly = Polynomial.fit(timestamps, humidity, deg=min(8, len(timestamps) - 1))
-        
     smooth_timestamps = np.linspace(0, len(timestamps) - 1, len(timestamps))
-    smooth_humidity = poly(smooth_timestamps)
     
     print("Cleaning and smoothing data...")
-
 
     master_data["Sea_Level_Pressure_hPa"] = master_data["BMP_Pressure_hPa"] * (1 - (master_data["BMP_Altitude_m"] / 44330.77))**-5.255
     master_data["DHT_Temperature_Smoothed"] = master_data["DHT_Temperature_C"].rolling(window=rolling_window, min_periods=1, center=True).mean()
@@ -1117,116 +1784,67 @@ def main():
     master_data["BMP_Pressure_hPa_Smoothed"] = master_data["BMP_Pressure_hPa"].rolling(window=rolling_window, min_periods=1, center=True).mean()        
     master_data["Sea_Level_Pressure_hPa_Smoothed"] = master_data["Sea_Level_Pressure_hPa"].rolling(window=rolling_window, min_periods=1, center=True).mean()                
     master_data["BH1750_Light_lx_Smoothed"] = master_data["BH1750_Light_lx"].rolling(window=rolling_window, min_periods=1, center=True).mean()                
-    master_data["DHT_Humidity_percent_Smoothed"] = master_data["DHT_Humidity_percent"].rolling(window=rolling_window, min_periods=1, center=True).mean()                
-
-    
-    
+    master_data["DHT_Humidity_percent_Smoothed"] = master_data["DHT_Humidity_percent"].rolling(window=rolling_window*2, min_periods=1, center=True).mean()                
     master_data["Median_Temperature_C"] = master_data[["BMP_Temperature_Smoothed", "DHT_Temperature_Smoothed"]].median(axis=1)
     master_data["Median_Temperature_F"] = master_data["Median_Temperature_C"] * 9 / 5 + 32
     master_data["Dew_Point_C"] = master_data.apply(lambda row: calculate_dew_point(row["Median_Temperature_C"], row["DHT_Humidity_percent"], row["BMP_Pressure_hPa"]),axis=1,)
     master_data["Dew_Point_C_smoothed"] = master_data["Dew_Point_C"].rolling(window=rolling_window, center=True).mean()                
-    # Generate plots
-    print("Fitting...")
-    
- 
-    
-    for label, delta in time_spans.items():
-        subset = master_data[master_data["Timestamp"] >= datetime.now(UTC) - delta]
 
-        rolling_window = int(len(subset)/10)            
+    # Replace infinities with NaNs for numeric columns only
+    numeric_cols = master_data.select_dtypes(include=[np.number]).columns
+    master_data[numeric_cols] = master_data[numeric_cols].replace([np.inf, -np.inf], np.nan)
 
-        if delta.total_seconds() < timedelta(hours=2).total_seconds():
-            poly_degree = 3
-            sinus_degree = 0
-        else:
-            poly_degree = 11
-            sinus_degree = 2
-            
-        # Define initial guesses for the fit parameters
-        initial_params = [0] * poly_degree  # Polynomial degree 4
-        initial_params += [0.1, 0.01, 0] * sinus_degree  # Two sinusoidal terms: amp, freq, phase
-        initial_params += [0.05]  # Noise level
+    # Drop rows with NaNs in any column
+    master_data.dropna(inplace=True)
+
+    # Reset index for a clean DataFrame
+    master_data.reset_index(drop=True, inplace=True)
+
+    # Optional: Verify no remaining NaNs or infinities in numeric columns
+    assert not master_data[numeric_cols].isnull().values.any(), "DataFrame still contains NaN values."
+    assert not np.isinf(master_data[numeric_cols].values).any(), "DataFrame still contains infinite values."
+
         
-        timestamps = np.arange(len(subset["Timestamp"]))
-        humidity = subset["DHT_Humidity_percent"].values
-        temperature = subset["BMP_Temperature_C"].values
-        pressure = subset["BMP_Pressure_hPa"].values
-        light = subset["BH1750_Light_lx"].values                                    
-        smooth_timestamps = np.linspace(0, len(timestamps) - 1, len(timestamps))
+    # Calculate the difference between max_timestamp and the current time
+    current_time = datetime.now(UTC) 
+    max_timestamp = master_data["Timestamp"].max()
+    time_difference = current_time - max_timestamp
+    
+    # Print the time difference to indicate how out-of-date the file is
+    print(f"File's last timestamp: {max_timestamp}")
+    print(f"Current time: {current_time}")
+    print(f"Time since last data update: {time_difference}")
 
+    out_of_date_flag = 0
+    if time_difference > timedelta(hours=1):
+        print("!!! WARNING !!!")
+        print(f"The file is over an hour out of date! Time difference: {time_difference}")
+        print("!!! PLEASE CHECK THE FILE STREAM/RPI !!!")
+        out_of_date_flag = 1
 
-        # Fit the model
-        print("\t - Humidity")                            
-        try:
-            print("\t\tTrying the complex polynomial fit...")                
-            popt, _ = curve_fit(flexible_fit, timestamps, humidity, p0=initial_params)
-            smooth_humidity = flexible_fit(smooth_timestamps, *popt)
-
-        except RuntimeError:
-            print(f"\t\t\t...Fit failed for {label}, using default polynomial fit!!!")
-            poly = Polynomial.fit(timestamps, humidity, deg=3)
-            smooth_humidity = poly(smooth_timestamps)
-
-
-        # Fit the model
-        print("\t - Temp")                            
-        try:
-            print("\t\tTrying the complex polynomial fit...")                
-            popt, _ = curve_fit(flexible_fit, timestamps, temperature, p0=initial_params)
-            smooth_temperature = flexible_fit(smooth_timestamps, *popt)
-
-        except RuntimeError:
-            print(f"\t\t\t...Fit failed for {label}, using default polynomial fit!!!")
-            poly = Polynomial.fit(timestamps, temperature, deg=3)
-            smooth_temperature = poly(smooth_timestamps)
-
-
-
-
-        # Fit the model
-        print("\t - Pressure")                            
-        try:
-            print("\t\tTrying the complex polynomial fit...")                
-            popt, _ = curve_fit(flexible_fit, timestamps, pressure, p0=initial_params)
-            smooth_pressure = flexible_fit(smooth_timestamps, *popt)
-
-        except RuntimeError:
-            print(f"\t\t\t...Fit failed for {label}, using default polynomial fit!!!")
-            poly = Polynomial.fit(timestamps, pressure, deg=3)
-            smooth_pressure = poly(smooth_timestamps)
-
-
-        # Fit the model
-        print("\t - Light")                            
-        try:
-            print("\t\tTrying the complex polynomial fit...")                
-            popt, _ = curve_fit(flexible_fit, timestamps, light, p0=initial_params)
-            smooth_light = flexible_fit(smooth_timestamps, *popt)
-
-        except RuntimeError:
-            print(f"\t\t\t...Fit failed for {label}, using default polynomial fit!!!")
-            poly = Polynomial.fit(timestamps, light, deg=3)
-            smooth_light = poly(smooth_timestamps)
-
-
-
-        subset["DHT_Humidity_percent_poly"] = smooth_humidity
-        subset["Median_Temperature_C_poly"] = smooth_temperature
-        subset["BMP_Pressure_hPa_poly"] = smooth_pressure
-        subset["BH1750_Light_lx_poly"] = smooth_light                                    
+    print("\tDetecting birds...")
+    BIRD_IMAGE_DIR = os.path.join(IMAGE_DIR, "birds")
+    detect_birds_in_images_gif(IMAGE_DIR, BIRD_IMAGE_DIR)
+        
+    for label, delta in time_spans.items():
         print("\tGenerating plots...")
-        generate_plots(subset, predict_data, f"/media/bigdata/weather_station/weather_plot_{label}.png", f"Weather Data ({label.replace('_', ' ').title()})")
+        # Use the maximum timestamp in the master_data DataFrame
+        # Subset the data based on the maximum timestamp
+        subset = master_data[master_data["Timestamp"] >= max_timestamp - delta]
+        #subset = master_data[master_data["Timestamp"] >= master_data["Timestamp"].max() - delta]
+        generate_plots(subset, predict_data, f"/media/bigdata/weather_station/weather_plot_{label}.png", f"Weather Data ({label.replace('_', ' ').title()})", out_of_date_flag)
 
-        subset = master_data[master_data["Timestamp"] >= datetime.now(UTC) - timedelta(minutes=30)]
-        generate_summary_plot(subset, f"/media/bigdata/weather_station/summary_plot.png")
+    print("\tGenerating hourly GIF...")
+    #generate_hourly_gif(IMAGE_DIR, GIF_OUTPUT)
+    generate_hourly_gif_with_plot(IMAGE_DIR, GIF_OUTPUT, master_data)
 
 
-        # Calculate rolling averages
-        print("\t\tCalculating rolling averages...")
-        calculate_rolling_averages(master_data, time_spans)
-        save_last_minute_averages(master_data, predict_data, "/media/bigdata/weather_station/small_summary.html")
-    print("Iteration complete!!!!! \n\n\tSleeping for 30 seconds...\n\n\n=============================================================================================")
-    time.sleep(25)
+    generate_summary_plot(master_data, f"/media/bigdata/weather_station/summary_plot.png")
+    print("\t\tCalculating rolling averages...")
+    #calculate_rolling_averages(master_data, time_spans)
+    save_last_minute_averages(master_data, predict_data, "/media/bigdata/weather_station/small_summary.html")
+
+
 
 
 
