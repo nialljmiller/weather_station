@@ -3,7 +3,7 @@
 *.jpg
 *.jpeg
 *.gif
-
+*.pt
 # Ignore data files
 *.csv
 *.json
