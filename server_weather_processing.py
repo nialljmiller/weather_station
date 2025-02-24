@@ -171,6 +171,7 @@ def append_new_data(master_data):
 
 
 
+
 def generate_hourly_gif(image_dir, output_gif):
     """
     Generates a GIF from the most recent hour of images with a timestamp (in Mountain Time)
@@ -682,152 +683,6 @@ def generate_hourly_gif_with_plot(image_dir, output_gif, data):
     print(f"[GIF] GIF saved to {output_gif}.")
 
 
-def detect_birds_in_images(image_dir, output_dir, confidence_threshold=0.15):
-    """
-    Detects animals (bird, squirrel, fox, rabbit) in the last 1000 images in the specified directory
-    using an ensemble of two pre-trained YOLOv5 models and saves annotated results. Each detection
-    is annotated with a red bounding box and red text showing the animal name and confidence.
-    The images are first rotated 180 degrees to correct for being upside down.
-
-    Args:
-        image_dir (str): Path to input image directory.
-        output_dir (str): Path to save output images and CSV.
-        confidence_threshold (float): Minimum confidence score for detections.
-    """
-    
-    # Create the output directory if it doesn't exist.
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Target classes of interest.
-    target_classes = ['bird', 'squirrel', 'fox', 'rabbit']
-    target_classes_names = ['Birb', 'Squiggle', 'Fox', 'Rabbit']
-
-    # Load two YOLOv5 models (assuming these models can detect the target classes).
-    try:
-        model1 = torch.hub.load('ultralytics/yolov5', 'yolov5l', pretrained=True)
-        model2 = torch.hub.load('ultralytics/yolov5', 'yolov5m', pretrained=True)
-    except Exception as e:
-        logging.error(f"Failed to load one or both YOLOv5 models: {e}")
-        return
-
-    # Get the last 1000 JPEG images from the image directory.
-    image_files = sorted(glob.glob(os.path.join(image_dir, "*.jpg")))#[-100:]
-    if not image_files:
-        logging.warning("No images found in the directory.")
-        return
-
-    logging.info(f"Processing {len(image_files)} images from {image_dir}...")
-
-    detected_image_count = 0  # Number of images containing any target detections.
-    results_list = []         # List to store detection details for CSV output.
-
-    # Set the desired large font size.
-    big_font_size = 50
-
-    # Try loading a large TrueType font.
-    try:
-        font = ImageFont.truetype("arial.ttf", big_font_size)
-    except Exception:
-        try:
-            # Try a common alternative (adjust path if needed).
-            font = ImageFont.truetype("DejaVuSans.ttf", big_font_size)
-        except Exception:
-            # Warn the user and fallback (note: load_default() is a fixed, small bitmap font).
-            logging.warning("Failed to load a large TrueType font; falling back to default (which may be too small).")
-            font = ImageFont.load_default()
-
-    # Process each image.
-    for img_path in image_files:
-        try:
-            img = Image.open(img_path).convert("RGB")
-            # Rotate the image 180 degrees to correct its orientation.
-            img = img.rotate(180, expand=True)
-        except Exception as e:
-            logging.warning(f"Skipping {img_path} due to error: {e}")
-            continue
-
-        # Run inference with both models.
-        try:
-            results1 = model1(img)
-            results2 = model2(img)
-        except Exception as e:
-            logging.error(f"Inference failed for {img_path}: {e}")
-            continue
-
-        # Get detection results as pandas DataFrames.
-        # Each DataFrame includes: xmin, ymin, xmax, ymax, confidence, class, and name.
-        df1 = results1.pandas().xyxy[0]
-        df2 = results2.pandas().xyxy[0]
-
-        # Filter detections based on confidence and target classes.
-        df1 = df1[(df1['confidence'] >= confidence_threshold) & (df1['name'].isin(target_classes))]
-        df2 = df2[(df2['confidence'] >= confidence_threshold) & (df2['name'].isin(target_classes))]
-
-        # Combine detections from both models.
-        combined_df = pd.concat([df1, df2], ignore_index=True)
-        if combined_df.empty:
-            # No target detections in this image.
-            continue
-
-        # Prepare tensors for Non-Maximum Suppression (NMS).
-        boxes = torch.tensor(combined_df[['xmin', 'ymin', 'xmax', 'ymax']].values, dtype=torch.float32)
-        scores = torch.tensor(combined_df['confidence'].values, dtype=torch.float32)
-        # Overlap threshold for NMS.
-        nms_threshold = 0.95
-
-        # Apply NMS to fuse overlapping detections.
-        keep_indices = nms(boxes, scores, nms_threshold)
-        fused_detections = combined_df.iloc[keep_indices.numpy()]
-
-        # Annotate the image if there are any fused detections.
-        if not fused_detections.empty:
-            detected_image_count += 1
-            draw = ImageDraw.Draw(img)
-
-            for _, row in fused_detections.iterrows():
-                box = [row['xmin'], row['ymin'], row['xmax'], row['ymax']]
-                confidence = row['confidence']
-                label = f"{row['name']}: {confidence:.2f}"
-
-                # Draw the red bounding box.
-                draw.rectangle(box, outline='red', width=3)
-                # Draw red text near the bottom-left corner of the box.
-                text_position = (row['xmin'], row['ymax'])
-                draw.text(text_position, label, fill='red', font=font)
-
-                # Append detection details for CSV output.
-                results_list.append({
-                    "image": os.path.basename(img_path),
-                    "class": row['name'],
-                    "xmin": row['xmin'],
-                    "ymin": row['ymin'],
-                    "xmax": row['xmax'],
-                    "ymax": row['ymax'],
-                    "confidence": confidence
-                })
-
-            # Save the annotated image.
-            output_path = os.path.join(output_dir, os.path.basename(img_path))
-            try:
-                img.save(output_path)
-                logging.info(f"Detection(s) found. Saved annotated image: {output_path}")
-            except Exception as e:
-                logging.error(f"Failed to save image {output_path}: {e}")
-
-    # Save the aggregated detection results to CSV.
-    if results_list:
-        results_df = pd.DataFrame(results_list)
-        csv_path = os.path.join(output_dir, "animal_detections.csv")
-        try:
-            results_df.to_csv(csv_path, index=False)
-            logging.info(f"Detection results saved to {csv_path}")
-        except Exception as e:
-            logging.error(f"Failed to save CSV file: {e}")
-    else:
-        logging.info("No target animals detected in any images.")
-
-    logging.info(f"Detection complete. {detected_image_count} images contained target animals.")
-
 
 
 def detect_birds_in_images_gif(image_dir, output_dir, confidence_threshold=0.15, log_file="processed_images.json"):
@@ -920,17 +775,27 @@ def detect_birds_in_images_gif(image_dir, output_dir, confidence_threshold=0.15,
         if combined_df.empty:
             if len(consecutive_bird_images) > 1:
                 middle_idx = len(consecutive_bird_images) // 2
-                middle_image_name = os.path.basename(new_images[i][0])
-                gif_name = f"{middle_image_name[:-4]}.gif"
-                gif_path = os.path.join(output_dir, gif_name)
-                consecutive_bird_images[0].save(gif_path, save_all=True, append_images=consecutive_bird_images[1:], duration=100, loop=0)
-                logging.info(f"Saved GIF: {gif_path}")
+                img_name = os.path.basename(new_images[i][0])
+                gif_name = f"{img_name[:-4]}.gif"
+                img_path = os.path.join(output_dir, gif_name)
+                consecutive_bird_images[0].save(img_path, save_all=True, append_images=consecutive_bird_images[1:], duration=100, loop=0)
+                logging.info(f"Saved GIF: {img_path}")
             elif len(consecutive_bird_images) == 1:
-                single_img_name = os.path.basename(new_images[i - 1][0])
-                single_img_path = os.path.join(output_dir, single_img_name)
-                consecutive_bird_images[0].save(single_img_path)
-                logging.info(f"Saved single image: {single_img_path}")
-            consecutive_bird_images = []
+                img_name = os.path.basename(new_images[i - 1][0])
+                img_path = os.path.join(output_dir, img_name)
+                consecutive_bird_images[0].save(img_path)
+                logging.info(f"Saved single image: {img_path}")
+            
+            if len(consecutive_bird_images) > 0:
+                consecutive_bird_images = []
+                consumer_key = 'EfllpzQx6tRE16RcLWvpTMxZS'
+                consumer_secret = 'tu5QqrhdgVsZU4RlgwTUuK9UY3ZmvzZ0CRUvyEDHBVXCO7eobl'
+                access_token = '2786965827-lQWhjB8wKGPVsj0VPZBHfuLokxQ0rQAFr04yXua'
+                access_token_secret = '8zmieIghGQG0IDTEsTzTkwZv5KNbnmJZzh3aLo6VyneBk'
+                tweet_text = img_name
+                #tweet_image(img_path, tweet_text, consumer_key, consumer_secret, access_token, access_token_secret)
+
+
             continue
         
         boxes = torch.tensor(combined_df[['xmin', 'ymin', 'xmax', 'ymax']].values, dtype=torch.float32)
@@ -964,6 +829,27 @@ def detect_birds_in_images_gif(image_dir, output_dir, confidence_threshold=0.15,
         pd.DataFrame(results_list).to_csv(os.path.join(output_dir, "animal_detections.csv"), index=False)
 
     logging.info(f"Detection complete. {detected_image_count} new images contained target animals.")
+
+
+
+
+
+
+import tweepy
+
+def tweet_image(image_path, tweet_text, consumer_key, consumer_secret, access_token, access_token_secret):
+    auth = tweepy.OAuthHandler(consumer_key, consumer_secret)
+    auth.set_access_token(access_token, access_token_secret)
+    api = tweepy.API(auth)
+    try:
+        api.update_status_with_media(status=tweet_text, filename=image_path)
+        print(f"Tweeted image {image_path}")
+    except Exception as e:
+        print(f"Failed to tweet: {e}")
+
+
+
+
 
 
 
