@@ -7,9 +7,6 @@ import datetime
 import threading
 import logging
 
-retry_time = 30            
-proc_retry_time = 120
-
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
 
@@ -17,6 +14,7 @@ def clean_ram():
     """Attempt to free up memory by running garbage collection."""
     gc.collect()
     logging.info("Garbage collection completed.")
+
 
 def kill_zombie_processes():
     """Terminate any zombie processes to release system resources."""
@@ -28,24 +26,23 @@ def kill_zombie_processes():
             except Exception as ex:
                 logging.error(f"Failed to kill process {proc.info['pid']}: {ex}")
 
+
 def run_ingest():
-    """Runs the ingest script every 30 seconds in a separate thread."""
+    """Runs the weather ingest script in a loop."""
     while True:
         try:
             subprocess.run(["python", "server_weather_ingest.py"], check=True)
-            retry_time = 30            
+            retry_time = 30
         except subprocess.CalledProcessError as e:
             retry_time = 5
-            logging.error(f"Processing script crashed with exit code {e.returncode}. Restarting in {retry_time} seconds...")
+            logging.error(f"Ingest script crashed with exit code {e.returncode}. Restarting in {retry_time} seconds...")
         except Exception as e:
             retry_time = 5
-            logging.error(f"Unexpected error in processing script: {e}. Restarting in {retry_time} seconds...")
-         
-        # Clean up RAM and kill zombie processes
+            logging.error(f"Unexpected error in ingest script: {e}. Restarting in {retry_time} seconds...")
+        
         clean_ram()
         kill_zombie_processes()
 
-        # Countdown timer before restarting
         for remaining in range(retry_time, 0, -1):
             print(f"Restarting weather ingest in {remaining} seconds...", end="\r", flush=True)
             time.sleep(1)
@@ -53,23 +50,21 @@ def run_ingest():
 
 
 def plant_plot():
-    """Runs the ingest script every 30 seconds in a separate thread."""
+    """Runs the plant plot script in a loop."""
     while True:
         try:
             subprocess.run(["python", "../plant_station/data_plot.py"], check=True)
-            retry_time = 120            
+            retry_time = 120
         except subprocess.CalledProcessError as e:
             retry_time = 5
             logging.error(f"Plant plot script crashed with exit code {e.returncode}. Restarting in {retry_time} seconds...")
         except Exception as e:
             retry_time = 5
             logging.error(f"Unexpected error in plant plot script: {e}. Restarting in {retry_time} seconds...")
-         
-        # Clean up RAM and kill zombie processes
+        
         clean_ram()
         kill_zombie_processes()
 
-        # Countdown timer before restarting
         for remaining in range(retry_time, 0, -1):
             print(f"Restarting plant plot in {remaining} seconds...", end="\r", flush=True)
             time.sleep(1)
@@ -77,65 +72,54 @@ def plant_plot():
 
 
 def plant_ingest():
-    """Runs the ingest script every 30 seconds in a separate thread."""
+    """Runs the plant ingest script in a loop."""
     while True:
         try:
             subprocess.run(["python", "../plant_station/plant_data_ingest.py"], check=True)
-            retry_time = 30            
+            retry_time = 30
         except subprocess.CalledProcessError as e:
             retry_time = 5
             logging.error(f"Plant ingest script crashed with exit code {e.returncode}. Restarting in {retry_time} seconds...")
         except Exception as e:
             retry_time = 5
             logging.error(f"Unexpected error in plant ingest script: {e}. Restarting in {retry_time} seconds...")
-         
-        # Clean up RAM and kill zombie processes
+        
         clean_ram()
         kill_zombie_processes()
 
-        # Countdown timer before restarting
         for remaining in range(retry_time, 0, -1):
             print(f"Restarting plant ingest in {remaining} seconds...", end="\r", flush=True)
             time.sleep(1)
         print("Restarting now!                               ")
 
 
-
-
-
 def run_processing():
-    """Runs the processing script in the main loop."""
+    """Runs the weather processing script in a loop."""
     while True:
         try:
             subprocess.run(["python", "server_weather_processing.py"], check=True)
             proc_retry_time = 120
 
-            # Current time
             current_time = datetime.datetime.now()
             start_time = current_time + datetime.timedelta(seconds=proc_retry_time)
 
             logging.info(
-                f"Weather processing complete!!!!! \n\n"
+                f"Weather processing complete!!!!!\n\n"
                 f"\tCurrent time: {current_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                f"\tSleeping for {retry_time / 60:.2f} mins...\n"
+                f"\tSleeping for {proc_retry_time / 60:.2f} mins...\n"
                 f"\tWill start again at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
                 f"============================================================================================="
             )
         except subprocess.CalledProcessError as e:
             proc_retry_time = 5
-
-
             logging.error(f"Processing script crashed with exit code {e.returncode}. Restarting in {proc_retry_time} seconds...")
         except Exception as e:
             proc_retry_time = 5
             logging.error(f"Unexpected error in processing script: {e}. Restarting in {proc_retry_time} seconds...")
         
-        # Clean up RAM and kill zombie processes
         clean_ram()
         kill_zombie_processes()
 
-        # Wait before restarting
-        # Countdown timer before restarting
         for remaining in range(proc_retry_time, 0, -1):
             print(f"Restarting weather processing in {remaining} seconds...", end="\r", flush=True)
             time.sleep(1)
@@ -143,15 +127,18 @@ def run_processing():
 
 
 if __name__ == "__main__":
-    # Start the ingest script in a separate thread
-    ingest_thread = threading.Thread(target=run_ingest, daemon=True)
-    ingest_thread.start()
-    
-    plant_plot_thread = threading.Thread(target=plant_plot, daemon=True)
-    plant_plot_thread.start()
+    # Create threads for each process
+    threads = [
+        threading.Thread(target=run_ingest),
+        threading.Thread(target=plant_plot),
+        threading.Thread(target=plant_ingest),
+        threading.Thread(target=run_processing),
+    ]
 
-    plant_ingest_thread = threading.Thread(target=plant_ingest, daemon=True)
-    plant_ingest_thread.start()    
+    # Start all threads
+    for t in threads:
+        t.start()
 
-    # Run the processing script in the main loop
-    run_processing()
+    # Join threads to keep the main thread alive
+    for t in threads:
+        t.join()

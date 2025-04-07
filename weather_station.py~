@@ -15,26 +15,6 @@ import psutil  # For CPU and memory usage
 from picamera2 import Picamera2
 
 
-def is_stable(prev_meta, curr_meta, threshold=0.05):
-    """
-    Compare selected metadata values between two frames.
-    Returns True if all values change less than the threshold (relative difference).
-    """
-    # List the keys you want to check. Adjust these keys based on what your camera provides.
-    keys_to_check = ["ExposureTime", "AnalogGain"]
-    
-    for key in keys_to_check:
-        if key in prev_meta and key in curr_meta:
-            # Avoid division by zero in case a value is zero
-            if prev_meta[key] == 0:
-                continue
-            print(f"{key} : {curr_meta[key]}")
-            relative_change = abs(curr_meta[key] - prev_meta[key]) / prev_meta[key]
-            if relative_change > threshold:
-                return False
-    return True
-
-
 
 def get_cpu_temp():
     # Reads the CPU temperature
@@ -190,8 +170,27 @@ def makedata():
 
 
 
-import time
-import os
+def is_stable(prev_meta, curr_meta, threshold=0.05):
+    """
+    Compare selected metadata values between two frames.
+    Returns True if all values change less than the threshold (relative difference).
+    """
+    # List the keys you want to check. Adjust these keys based on what your camera provides.
+    keys_to_check = ["ExposureTime", "AnalogGain"]
+    
+    for key in keys_to_check:
+        if key in prev_meta and key in curr_meta:
+            # Avoid division by zero in case a value is zero
+            if prev_meta[key] == 0:
+                continue
+            print(f"{key} : {curr_meta[key]}")
+            relative_change = abs(curr_meta[key] - prev_meta[key]) / prev_meta[key]
+            if relative_change > threshold:
+                return False
+    return True
+
+
+
 
 def take_pic():
     # Initialize the camera
@@ -213,16 +212,16 @@ def take_pic():
     metadata = picam2.capture_metadata()
     light_level = metadata.get("Lux", 200)  # Default to bright if value missing
 
-    if light_level < 100:  # Switch to IR Mode if necessary
+    if light_level < 100:  # Low light condition
         print("Low light detected. Switching to IR mode...")
-
         picam2.set_controls({
-            "AwbEnable": False,  # Disable Auto White Balance
-            "AnalogueGain": 8.0,  # Increase sensitivity (dynamic adjustment below)
-            "Saturation": 0.0,  # Remove color
-            "Contrast": 1.2,  # Slight contrast boost
-            "Sharpness": 1.5,  # Enhance details
-            "DenoiseStrength": 0.1,  # Reduce noise in low-light
+            "AeEnable": False,  # disable auto exposure for manual control
+            "AwbEnable": False, # disable auto white balance since IR can mess that up
+            "ExposureTime": 3000000,  # set a longer exposure time (in microseconds); adjust as needed
+            "AnalogueGain": 9.0,  # you might need to bump this up further if necessary
+            "Saturation": 0.0,
+            "Contrast": 1.2,
+            "Sharpness": 1.5,
         })
         makedata()
 
@@ -234,6 +233,9 @@ def take_pic():
     required_stable_iterations = 3
     max_iterations = 30
     iteration = 0
+
+    if light_level < 100:
+        iteration = max_iterations
 
     while iteration < max_iterations:
         _ = picam2.capture_array("main")  # Dummy capture to update settings
@@ -367,7 +369,7 @@ def send_data():
         print("Data successfully transferred to the server.")
 
 
-        write_timer = time.time()
+
 
     except subprocess.CalledProcessError as e:
         print(f"Error transferring data to the server: {e}\n")    
@@ -383,7 +385,7 @@ def del_data():
         writer = csv.writer(file)
         writer.writerow(["Timestamp", "CPU Temperature (°C)", "CPU Usage (%)", "Memory Usage (%)"])
     print("Local data cleared to save space.\n")
-    del_timer = time.time()
+
 
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -447,11 +449,13 @@ while True:
         time_to_del = time.time() - del_timer
 
 
-        if time_to_write > 60:  # Every minute
+        if time_to_write > 300:  # Every minute
             makedata()            
             send_data()
+            write_timer = time.time()
             if time_to_del > 600:
                 del_data()
+                del_timer = time.time()
 
         makedata_time(sample_duration = 5, sample_interval = 0.1)
         makedata_time(sample_duration = 5, sample_interval = 0.1)

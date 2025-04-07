@@ -17,6 +17,7 @@ import warnings
 from datetime import datetime, timedelta
 from io import BytesIO
 import glob
+import fcntl
 
 import pandas as pd
 import pytz
@@ -58,21 +59,55 @@ if not os.path.exists(MASTER_FILE):
         "BH1750_Light_lx"
     ]).to_csv(MASTER_FILE, index=False)
 
+def safe_write_csv(df, filename):
+    with open(filename, "w") as f:
+        # Acquire exclusive lock
+        fcntl.flock(f, fcntl.LOCK_EX)
+        df.to_csv(f, index=False)
+        fcntl.flock(f, fcntl.LOCK_UN)
+
+
 
 def load_master_data(fp):
     """
     Load master data from a CSV file.
-
-    Args:
-        fp (str): Path to the CSV file.
-
-    Returns:
-        pd.DataFrame: DataFrame containing the master data.
+    If timestamps are missing, infer them based on the file's modification time
+    or by interpolating between valid timestamps.
     """
-    data = pd.read_csv(fp, on_bad_lines="skip")
-    data["Timestamp"] = pd.to_datetime(data["Timestamp"], errors="coerce")
-    data = data.dropna(subset=["Timestamp"]).sort_values("Timestamp").reset_index(drop=True)
+    try:
+        # Use warn so you know if any rows are messed up
+        data = pd.read_csv(fp, on_bad_lines="warn")
+    except Exception as e:
+        logging.error(f"Error reading master file: {e}")
+        return pd.DataFrame()
+
+    if "Timestamp" not in data.columns:
+        logging.warning("No 'Timestamp' column found. Inferring timestamps using file modification time.")
+        # Use file modification time as a base timestamp
+        mod_time = os.path.getmtime(fp)
+        base_time = pd.to_datetime(mod_time, unit="s")
+        # Create timestamps at a fixed interval (e.g., 1 second apart)
+        data["Timestamp"] = [base_time + pd.Timedelta(seconds=i) for i in range(len(data))]
+    else:
+        # Convert timestamps; unparseable ones become NaT
+        data["Timestamp"] = pd.to_datetime(data["Timestamp"], errors="coerce")
+        if data["Timestamp"].isnull().any():
+            logging.warning("Missing timestamps found. Attempting to infer them by interpolation.")
+            valid_count = data["Timestamp"].notnull().sum()
+            if valid_count >= 2:
+                # Convert to numeric (nanoseconds since epoch) for interpolation
+                numeric_ts = data["Timestamp"].apply(lambda x: x.value if pd.notnull(x) else None)
+                numeric_ts = pd.Series(numeric_ts).interpolate(method="linear")
+                data["Timestamp"] = pd.to_datetime(numeric_ts)
+            else:
+                # If not enough valid timestamps, use current time for missing ones
+                logging.warning("Not enough valid timestamps to interpolate. Filling missing ones with current time.")
+                data["Timestamp"] = data["Timestamp"].fillna(pd.Timestamp.now())
+
+    # Sort the DataFrame with valid timestamps first
+    data = data.sort_values("Timestamp", na_position="last").reset_index(drop=True)
     return data
+
 
 
 def generate_json_from_csv(csv_path, json_path):
@@ -140,7 +175,8 @@ def append_new_data(master_data):
     combined_data = combined_data.drop_duplicates(subset="Timestamp").sort_values("Timestamp").reset_index(drop=True)
 
     # Save updated master data and generate corresponding JSON
-    combined_data.to_csv(MASTER_FILE, index=False)
+    #combined_data.to_csv(MASTER_FILE, index=False)
+    safe_write_csv(combined_data, MASTER_FILE)
     generate_json_from_csv(MASTER_FILE, MASTER_FILE_JSON)
     logging.info(f"Appended new data and saved to {MASTER_FILE}. Total rows: {len(combined_data)}.")
 
@@ -259,14 +295,13 @@ def gather_system_stats(output_file="system_stats.csv"):
 
 
 def main():
-    logging.info("Starting server weather ingest script...")
+    #logging.info("Starting server weather ingest script...")
 
-    local_stats_file = "my_pc_stats.csv"
+    #local_stats_file = "my_pc_stats.csv"
     # Uncomment the next line if you wish to initialize the stats CSV with headers.
     # initialize_csv(local_stats_file)
-    gather_system_stats(local_stats_file)
-
-    logging.info("Appending new weather data...")
+    #gather_system_stats(local_stats_file)
+    #logging.info("Appending new weather data...")
     master_data = load_master_data(MASTER_FILE)
     master_data = append_new_data(master_data)
 

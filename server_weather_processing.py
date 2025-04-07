@@ -57,7 +57,7 @@ from scipy.interpolate import make_interp_spline
 from scipy.optimize import curve_fit
 from sklearn.preprocessing import MinMaxScaler
 from numpy.polynomial import Polynomial
-import GPy
+#import GPy
 import os
 import glob
 import logging
@@ -76,6 +76,9 @@ from pynvml import (
 )
 from pynvml import *
 import warnings
+import bird_detection
+
+
 
 # Suppress FutureWarnings related to torch.cuda.amp.autocast
 warnings.filterwarnings(
@@ -93,8 +96,17 @@ warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
+#from instabot import Bot
+#try:
+#    os.remove("config/birdbot9000_uuid_and_cookie.json")
+#except:
+#    pass
 
-
+#try:
+    #bot = Bot()
+    #bot.login(username="birdbot9000", password="BirdBot9K!")
+#except:
+#    pass
 
 # File paths
 INCOMING_FILE = "/media/bigdata/weather_station/weather_data.csv"
@@ -115,148 +127,45 @@ if not os.path.exists(MASTER_FILE):
         "BH1750_Light_lx"
     ]).to_csv(MASTER_FILE, index=False)
 
-
-
-
 def load_master_data(fp):
-    """Load the master data from the CSV file."""
-    data = pd.read_csv(fp, on_bad_lines='skip') 
-    data["Timestamp"] = pd.to_datetime(data["Timestamp"], errors="coerce")
-    data = data.dropna(subset=["Timestamp"])  # Drop rows with invalid timestamps
-    data = data.sort_values("Timestamp").reset_index(drop=True)
-    return data
-
-def append_new_data(master_data):
-    """Append new data from the incoming file to the master DataFrame."""
-    if not os.path.exists(INCOMING_FILE):
-        print(f"Incoming file {INCOMING_FILE} does not exist. Skipping this iteration.")
-        return master_data
-
-    # Validate file type
-    file_type, encoding = mimetypes.guess_type(INCOMING_FILE)
-    if file_type != "text/csv":
-        print(f"Warning: {INCOMING_FILE} is not a text/csv file. Detected type: {file_type}")
-        return master_data
-
-    # Load incoming data
+    """
+    Load master data from a CSV file.
+    If timestamps are missing, infer them based on the file's modification time
+    or by interpolating between valid timestamps.
+    """
     try:
-        incoming_data = pd.read_csv(INCOMING_FILE, encoding="utf-8", on_bad_lines="skip")
-        incoming_data["Timestamp"] = pd.to_datetime(incoming_data["Timestamp"], errors="coerce")
-        incoming_data = incoming_data.dropna(subset=["Timestamp"])
+        # Use warn so you know if any rows are messed up
+        data = pd.read_csv(fp, on_bad_lines="warn")
     except Exception as e:
-        print(f"Error loading incoming data: {e}")
-        return master_data
+        logging.error(f"Error reading master file: {e}")
+        return pd.DataFrame()
 
-    # Ensure timestamps are timezone-aware and converted to UTC
-    if incoming_data["Timestamp"].dt.tz is None:
-        incoming_data["Timestamp"] = incoming_data["Timestamp"].dt.tz_localize("UTC")
+    if "Timestamp" not in data.columns:
+        logging.warning("No 'Timestamp' column found. Inferring timestamps using file modification time.")
+        # Use file modification time as a base timestamp
+        mod_time = os.path.getmtime(fp)
+        base_time = pd.to_datetime(mod_time, unit="s")
+        # Create timestamps at a fixed interval (e.g., 1 second apart)
+        data["Timestamp"] = [base_time + pd.Timedelta(seconds=i) for i in range(len(data))]
     else:
-        incoming_data["Timestamp"] = incoming_data["Timestamp"].dt.tz_convert("UTC")
+        # Convert timestamps; unparseable ones become NaT
+        data["Timestamp"] = pd.to_datetime(data["Timestamp"], errors="coerce")
+        if data["Timestamp"].isnull().any():
+            logging.warning("Missing timestamps found. Attempting to infer them by interpolation.")
+            valid_count = data["Timestamp"].notnull().sum()
+            if valid_count >= 2:
+                # Convert to numeric (nanoseconds since epoch) for interpolation
+                numeric_ts = data["Timestamp"].apply(lambda x: x.value if pd.notnull(x) else None)
+                numeric_ts = pd.Series(numeric_ts).interpolate(method="linear")
+                data["Timestamp"] = pd.to_datetime(numeric_ts)
+            else:
+                # If not enough valid timestamps, use current time for missing ones
+                logging.warning("Not enough valid timestamps to interpolate. Filling missing ones with current time.")
+                data["Timestamp"] = data["Timestamp"].fillna(pd.Timestamp.now())
 
-    if master_data["Timestamp"].dt.tz is None:
-        master_data["Timestamp"] = master_data["Timestamp"].dt.tz_localize("UTC")
-    else:
-        master_data["Timestamp"] = master_data["Timestamp"].dt.tz_convert("UTC")
-
-    # Concatenate and remove duplicates
-    combined_data = pd.concat([master_data, incoming_data], ignore_index=True)
-    combined_data = combined_data.drop_duplicates(subset="Timestamp").sort_values("Timestamp").reset_index(drop=True)
-
-    # Save to master file
-    combined_data.to_csv(MASTER_FILE, index=False)
-    generate_json_from_csv(MASTER_FILE, MASTER_FILE_json)
-    print(f"Appended new data and saved to {MASTER_FILE}. Total rows: {len(combined_data)}.")
-
-    return combined_data
-
-
-
-
-def generate_hourly_gif(image_dir, output_gif):
-    """
-    Generates a GIF from the most recent hour of images with a timestamp (in Mountain Time)
-    in the bottom-right corner.
-    
-    Args:
-        image_dir (str): Directory where images are stored.
-        output_gif (str): Path to save the final GIF.
-    """
-    # Temporary filename to avoid access issues
-    temp_gif = os.path.join(os.path.dirname(output_gif), "temp.gif")
-
-    # Get current time in UTC
-    now = datetime.utcnow()
-
-    # Get all images sorted by timestamp
-    image_files = sorted(glob.glob(f"{image_dir}/*.jpg"))
-
-    # Filter images from the last hour
-    recent_images = []
-    for img in image_files:
-        try:
-            # Extract timestamp from filename (new format: YYYYMMDD_HHMMSS)
-            img_filename = os.path.basename(img).replace(".jpg", "")
-            img_timestamp = datetime.strptime(img_filename, "%Y%m%d_%H%M%S")
-            if now - img_timestamp <= timedelta(hours=1):
-                recent_images.append((img, img_timestamp))
-        except ValueError:
-            continue  # Skip files with incorrect naming format
-
-    # Ensure there are enough images to make a GIF
-    if len(recent_images) < 2:
-        print("[GIF] Not enough images to generate GIF (need at least 2). Skipping.")
-        return
-
-    print(f"[GIF] Generating GIF from {len(recent_images)} images...")
-
-    frames = []
-    # Define the Mountain Time zone (using America/Denver, which handles DST)
-    mountain_tz = pytz.timezone("America/Denver")
-
-    for img_path, timestamp in recent_images:
-        # First, treat the naive timestamp as UTC
-        utc_timestamp = pytz.UTC.localize(timestamp)
-        # Convert the timestamp to Mountain Time
-        mountain_time = utc_timestamp.astimezone(mountain_tz)
-
-        # Open image and flip vertically
-        img = Image.open(img_path).transpose(Image.ROTATE_180)
-
-        # Create a draw object
-        draw = ImageDraw.Draw(img)
-        
-        # Load font (default PIL font if not found)
-        try:
-            font = ImageFont.truetype("arial.ttf", 512)  # Adjust size if needed
-        except IOError:
-            font = ImageFont.load_default()
-
-        # Format timestamp in Mountain Time
-        text = mountain_time.strftime("%Y-%m-%d %H:%M:%S")
-        text_color = (255, 0, 0)  # Red
-        text_position = (img.width - 150, img.height - 30)  # Bottom-right corner
-
-        # Draw timestamp
-        draw.text(text_position, text, font=font, fill=text_color)
-
-        frames.append(img)
-
-    # Save GIF as temporary file
-    frames[0].save(
-        temp_gif,
-        save_all=True,
-        append_images=frames[1:],
-        duration=100,  # 100ms per frame
-        loop=0
-    )
-
-    # Rename temp.gif to the final name (atomic operation)
-    os.replace(temp_gif, output_gif)
-    
-    print(f"[GIF] GIF saved to {output_gif}.")
-
-
-
+    # Sort the DataFrame with valid timestamps first
+    data = data.sort_values("Timestamp", na_position="last").reset_index(drop=True)
+    return data
 
 
 def initialize_csv(output_file="system_stats.csv"):
@@ -362,95 +271,6 @@ def gather_system_stats(output_file="system_stats.csv"):
     nvmlShutdown()
 
 
-
-
-def plot_training_loss(file_path="training_loss.csv", output_path="training_loss_plot.png"):
-    """
-    Reads training_loss.csv and saves a line plot of the loss per epoch.
-    The plot includes the file creation date in the title and uses an exponential scale for the loss axis.
-    """
-    try:
-        # Get file creation date
-        creation_date = None
-        if os.path.exists(file_path):
-            creation_timestamp = os.path.getmtime(file_path)
-            creation_date = datetime.fromtimestamp(creation_timestamp).strftime('%Y-%m-%d')
-
-        with open(file_path, mode='r') as file:
-            reader = csv.reader(file)
-            data = list(reader)
-
-            if len(data) < 2:
-                print("No training data found in the file to plot.")
-                return
-
-            # Extracting data
-            epochs = []
-            losses = []
-            for row in data[1:]:  # Skip header
-                epochs.append(int(row[0]))
-                losses.append(float(row[1]))
-
-            # Plotting
-            plt.figure(figsize=(8, 6))
-            plt.plot(epochs, losses, marker='o', linestyle='-', label='Loss')
-            title = "Training Loss Per Epoch"
-            if creation_date:
-                title += f" (File Created: {creation_date})"
-            plt.title(title)
-            plt.xlabel("Epoch")
-            plt.ylabel("Loss")
-            plt.yscale('log')  # Set y-axis to exponential (logarithmic) scale
-            plt.grid(True, which="both", linestyle='--', linewidth=0.5)
-            plt.legend()
-            plt.savefig(output_path)
-            plt.close()
-
-            print(f"Training loss plot saved to {output_path}.")
-
-    except FileNotFoundError:
-        print(f"File {file_path} not found.")
-    except Exception as e:
-        print(f"An error occurred: {e}")
-
-
-
-def plot_final_losses(file_path="final_losses.csv", output_path="final_losses_plot.png"):
-    """
-    Reads final_losses.csv and saves a line plot of the final losses across runs with an exponential y-axis.
-    """
-    try:
-        with open(file_path, mode='r') as file:
-            reader = csv.reader(file)
-            data = list(reader)
-
-            if not data:
-                print("No final losses data found in the file to plot.")
-                return
-
-            # Extracting data
-            runs = list(range(1, len(data) + 1))
-            losses = [float(row[0]) for row in data]
-
-            # Plotting
-            plt.figure(figsize=(8, 6))
-            plt.plot(runs, losses, marker='o', color='blue', label='Final Loss')
-            plt.yscale('log')  # Set y-axis to exponential scale (logarithmic)
-            plt.title("Final Losses Across Runs")
-            plt.xlabel("Run")
-            plt.ylabel("Loss (log scale)")
-            plt.grid(axis='y', linestyle='--', alpha=0.7)
-            plt.xticks(runs)
-            plt.legend()
-            plt.savefig(output_path)
-            plt.close()
-
-            print(f"Final losses plot saved to {output_path}.")
-
-    except FileNotFoundError:
-        print(f"File {file_path} not found.")
-    except Exception as e:
-        print(f"An error occurred: {e}")
 
 
 
@@ -685,173 +505,6 @@ def generate_hourly_gif_with_plot(image_dir, output_gif, data):
 
 
 
-def detect_birds_in_images_gif(image_dir, output_dir, confidence_threshold=0.15, log_file="processed_images.json"):
-    os.makedirs(output_dir, exist_ok=True)
-    
-    target_classes = ['bird', 'squirrel', 'fox', 'rabbit']
-
-    # Load YOLOv5 models (or any other detection model)
-    try:
-        model1 = torch.hub.load('ultralytics/yolov5', 'custom', path='yolov5m.pt', force_reload=True)
-        model2 = torch.hub.load('ultralytics/yolov5', 'custom', path='yolov5l.pt', force_reload=True)
-    except Exception as e:
-        logging.error(f"Failed to load models: {e}")
-        return  # Exit function if models cannot be loaded
-
-    # Get all JPEG images (assumes naming convention: YYYYMMDD_HHMMSS.jpg)
-    image_files = sorted(glob.glob(os.path.join(image_dir, "*.jpg")))
-
-    # Extract timestamps from filenames and store them with the file paths
-    timestamps = []
-    for img in tqdm(image_files, desc="Extracting timestamps", unit="file"):
-        try:
-            img_filename = os.path.basename(img).replace(".jpg", "")
-            img_timestamp = datetime.strptime(img_filename, "%Y%m%d_%H%M%S")
-            img_timestamp = pytz.UTC.localize(img_timestamp)  # Localize to UTC
-            timestamps.append((img, img_timestamp))
-        except ValueError:
-            continue  # Skip files with incorrect naming format
-
-    # Determine 'now' as the most recent image timestamp
-    if timestamps:
-        timestamps.sort(key=lambda x: x[1])  # Sort by timestamp
-        now = timestamps[-1][1]  # Most recent timestamp
-        then = timestamps[0][1]  # Most recent timestamp
-    else:
-        now = datetime.now(pytz.UTC)  # Default to actual UTC time if no images
-
-    # Define the start time as one hour before the most recent image
-    plot_start = now - timedelta(hours=1)
-
-    # Filter images from the last hour
-    new_images = [(img, ts) for img, ts in timestamps if ts >= plot_start]
-
-    # Print results for verification
-    print(f"Most recent image timestamp (now): {now}")
-    print(f"Oldest image timestamp being processed: {then}")
-    print(f"Number of images in the last hour: {len(new_images)}")
-
-    if not new_images:
-        logging.info("No new images to process.")
-        return
-    
-    logging.info(f"Processing {len(new_images)} new images...")
-    results_list = []
-    detected_image_count = 0
-    consecutive_bird_images = []
-    
-    try:
-        font = ImageFont.truetype("arial.ttf", 50)
-    except:
-        try:
-            font = ImageFont.truetype("DejaVuSans.ttf", 50)
-        except:
-            logging.warning("Failed to load TrueType font, falling back to default.")
-            font = ImageFont.load_default()
-    
-
-
-    for i, (img_path, img_timestamp) in tqdm(enumerate(new_images)): 
-        try:
-            img = Image.open(img_path).convert("RGB").rotate(180, expand=True)
-        except Exception as e:
-            logging.warning(f"Skipping {img_path} due to error: {e}")
-            continue
-        
-        try:
-            results1 = model1(img)
-            results2 = model2(img)
-        except Exception as e:
-            logging.error(f"Inference failed for {img_path}: {e}")
-            continue
-        
-        df1 = results1.pandas().xyxy[0]
-        df2 = results2.pandas().xyxy[0]
-        
-        df1 = df1[(df1['confidence'] >= confidence_threshold) & (df1['name'].isin(target_classes))]
-        df2 = df2[(df2['confidence'] >= confidence_threshold) & (df2['name'].isin(target_classes))]
-        
-        combined_df = pd.concat([df1, df2], ignore_index=True)
-        if combined_df.empty:
-            if len(consecutive_bird_images) > 1:
-                middle_idx = len(consecutive_bird_images) // 2
-                img_name = os.path.basename(new_images[i][0])
-                gif_name = f"{img_name[:-4]}.gif"
-                img_path = os.path.join(output_dir, gif_name)
-                consecutive_bird_images[0].save(img_path, save_all=True, append_images=consecutive_bird_images[1:], duration=100, loop=0)
-                logging.info(f"Saved GIF: {img_path}")
-            elif len(consecutive_bird_images) == 1:
-                img_name = os.path.basename(new_images[i - 1][0])
-                img_path = os.path.join(output_dir, img_name)
-                consecutive_bird_images[0].save(img_path)
-                logging.info(f"Saved single image: {img_path}")
-            
-            if len(consecutive_bird_images) > 0:
-                consecutive_bird_images = []
-                consumer_key = 'EfllpzQx6tRE16RcLWvpTMxZS'
-                consumer_secret = 'tu5QqrhdgVsZU4RlgwTUuK9UY3ZmvzZ0CRUvyEDHBVXCO7eobl'
-                access_token = '2786965827-lQWhjB8wKGPVsj0VPZBHfuLokxQ0rQAFr04yXua'
-                access_token_secret = '8zmieIghGQG0IDTEsTzTkwZv5KNbnmJZzh3aLo6VyneBk'
-                tweet_text = img_name
-                #tweet_image(img_path, tweet_text, consumer_key, consumer_secret, access_token, access_token_secret)
-
-
-            continue
-        
-        boxes = torch.tensor(combined_df[['xmin', 'ymin', 'xmax', 'ymax']].values, dtype=torch.float32)
-        scores = torch.tensor(combined_df['confidence'].values, dtype=torch.float32)
-        keep_indices = nms(boxes, scores, 0.5)
-        fused_detections = combined_df.iloc[keep_indices.numpy()]
-        
-        if not fused_detections.empty:
-            detected_image_count += 1
-            draw = ImageDraw.Draw(img)
-            
-            for _, row in fused_detections.iterrows():
-                box = [row['xmin'], row['ymin'], row['xmax'], row['ymax']]
-                label = f"{row['name']}: {row['confidence']:.2f}"
-                draw.rectangle(box, outline='red', width=1)
-                draw.text((row['xmin'], row['ymax']), label, fill='red', font=font)
-                
-                results_list.append({
-                    "image": os.path.basename(img_path),
-                    "class": row['name'],
-                    "xmin": row['xmin'],
-                    "ymin": row['ymin'],
-                    "xmax": row['xmax'],
-                    "ymax": row['ymax'],
-                    "confidence": row['confidence']
-                })
-            
-            consecutive_bird_images.append(img)
-    
-    if results_list:
-        pd.DataFrame(results_list).to_csv(os.path.join(output_dir, "animal_detections.csv"), index=False)
-
-    logging.info(f"Detection complete. {detected_image_count} new images contained target animals.")
-
-
-
-
-
-
-import tweepy
-
-def tweet_image(image_path, tweet_text, consumer_key, consumer_secret, access_token, access_token_secret):
-    auth = tweepy.OAuthHandler(consumer_key, consumer_secret)
-    auth.set_access_token(access_token, access_token_secret)
-    api = tweepy.API(auth)
-    try:
-        api.update_status_with_media(status=tweet_text, filename=image_path)
-        print(f"Tweeted image {image_path}")
-    except Exception as e:
-        print(f"Failed to tweet: {e}")
-
-
-
-
-
-
 
 def generate_plots(data, predict_data, output_path, title, out_of_date_flag):
     """Generate a 4x4 subplot for temperature, humidity, pressure, and light with additional calculated metrics."""
@@ -932,20 +585,37 @@ def generate_plots(data, predict_data, output_path, title, out_of_date_flag):
     data["ECI"] = np.clip(ECI, 0, 1)
     
     fig, axs = plt.subplots(4, 2, figsize=(15, 15))
-    
 
-    # Calculate the maximum length allowed for predicted data (1/4th of the main data length)
-    max_predicted_length = len(data["Timestamp"]) // 4
+    # Get the timestamp of the last real datapoint
+    last_real_timestamp = data["Timestamp"].iloc[-1]
 
-    # Find the starting index of the predictions after the real data
-    start_index = predict_data["Timestamp"].searchsorted(data["Timestamp"].iloc[-2], side="right")
+    # Calculate the real data time span
+    real_start = data["Timestamp"].iloc[0]
+    real_end = last_real_timestamp
+    real_time_span = real_end - real_start
 
-    # Ensure predicted data starts immediately after the real data and is limited to the specified length
-    predict_data_subset = predict_data.iloc[start_index:start_index + max_predicted_length]
+    # Calculate the maximum predicted time span (25% of the real time span)
+    max_predicted_span = real_time_span / 4
+    max_predicted_end_time = last_real_timestamp + max_predicted_span
 
-    # Find overlapping predicted data (predictions before the end of the real data)
-    overlap_index = predict_data["Timestamp"].searchsorted(data["Timestamp"].iloc[-2], side="left")
-    predict_data_overlap = predict_data.iloc[:overlap_index]
+    # Filter predict_data so that predicted timestamps are within the allowed span
+    predict_data_subset = predict_data[predict_data["Timestamp"] <= max_predicted_end_time].copy()
+
+    # Prepend the last real datapoint to the predicted subset so the lines join
+    last_real_row = data.iloc[[-1]].copy()
+    last_real_row["Timestamp"] = last_real_timestamp  # Ensure timestamp is correct
+    # Use a temperature column from the real data (e.g., BMP_Temperature_C)
+    last_real_row["Predicted_Temperature"] = last_real_row["BMP_Temperature_C"]
+    predict_data_subset = pd.concat([last_real_row, predict_data_subset], ignore_index=True)
+
+
+    # Prepend the last real datapoint to the predicted subset.
+    # Here, we assume that the actual temperature to join is, say, BMP_Temperature_C.
+    # You can change that to whichever temperature column you want.
+    last_real_row = data.iloc[[-1]].copy()
+    last_real_row["Timestamp"] = last_real_timestamp  # Ensure the timestamp is set
+    last_real_row["Predicted_Temperature"] = last_real_row["BMP_Temperature_C"]
+    predict_data_subset = pd.concat([last_real_row, predict_data_subset], ignore_index=True)
 
     # Temperature Plot
     ax1 = axs[0, 0]
@@ -960,12 +630,46 @@ def generate_plots(data, predict_data, output_path, title, out_of_date_flag):
     ax1.legend(loc="upper left")
     ax1.grid()
 
+
+    # Compute x-axis limits using only the real data timestamps
+    x_min = data["Timestamp"].min()
+    x_max = data["Timestamp"].max()
+    x_range = x_max - x_min
+    x_padding = x_range * 0.05  # 5% padding
+
+    # Apply the limits to the x-axis
+    ax1.set_xlim(x_min - x_padding, x_max + x_padding)
+
+    # Define the real temperature columns (ignore the predicted temperature)
+    real_temp_cols = [
+        "BMP_Temperature_C",
+        "DHT_Temperature_C",
+        "BMP_Temperature_Smoothed",
+        "DHT_Temperature_Smoothed",
+        "Median_Temperature_C"
+    ]
+
+    # Calculate the overall min and max from the real temperature data
+    y_min = data[real_temp_cols].min().min()
+    y_max = data[real_temp_cols].max().max()
+    y_range = y_max - y_min
+    y_padding = y_range * 0.05  # 5% padding
+
+    # Apply the limits to the y-axis
+    ax1.set_ylim(y_min - y_padding, y_max + y_padding)
+
+
+
+    
     
     # Add Fahrenheit Scale
     ax_f = ax1.twinx()
     ax_f.plot(data["Timestamp"], data["BMP_Temperature_C"] * 9/5 + 32, alpha=0)  # Invisible line for correct scaling
     ax_f.set_ylabel("Temperature (°F)", color="red")
     ax_f.tick_params(axis="y", labelcolor="red")
+
+
+
 
 
     # Humidity Plot with Cubic Spline
@@ -1545,27 +1249,27 @@ def construct_time_spans(directory="."):
     file_mod_times = get_file_modification_times(directory)
     time_spans = {}
     #print(file_mod_times)
-    if any((now - mod_time) > timedelta(hours=2) for mod_time in file_mod_times):
-        time_spans["all_time"] = timedelta(days=3650)
-        
-    if any((now - mod_time) > timedelta(days=1) for mod_time in file_mod_times):
-        time_spans["1_year"] = timedelta(days=365)  # Effectively no limit    
-        time_spans["1_month"] = timedelta(weeks=4)  # Effectively no limit                    
-        
-    if any((now - mod_time) > timedelta(minutes=30) for mod_time in file_mod_times):
-        time_spans["1_hour"] = timedelta(hours=1)
-        
-    if any((now - mod_time) > timedelta(hours=1) for mod_time in file_mod_times):
-        time_spans["1_day"] = timedelta(days=1)
+    #if any((now - mod_time) > timedelta(hours=2) for mod_time in file_mod_times):
+    #    time_spans["1_week"] = timedelta(weeks=1)
+    #    
+    #if any((now - mod_time) > timedelta(days=1) for mod_time in file_mod_times):
+    #    time_spans["1_year"] = timedelta(days=365)  # Effectively no limit    
+    #    time_spans["1_month"] = timedelta(weeks=4)  # Effectively no limit                    
+    #    
+    #if any((now - mod_time) > timedelta(minutes=30) for mod_time in file_mod_times):
+    #    time_spans["1_hour"] = timedelta(hours=1)
+    #    
+    #if any((now - mod_time) > timedelta(hours=1) for mod_time in file_mod_times):
+    #    time_spans["1_day"] = timedelta(days=1)
 
 
-    time_spans["all_time"] = timedelta(days=3650)
-    #time_spans["1_year"] = timedelta(days=365),  # Effectively no limit    
-    #time_spans["1_month"] = timedelta(weeks=4),  # Effectively no limit       
-    #time_spans["1_day"] = timedelta(days=1)
-    #time_spans["1_hour"] = timedelta(hours=1)
-    time_spans["10_minutes"] = timedelta(minutes=10)  # Always add 10 minutes
-          
+    #time_spans["all_time"] = timedelta(days=3650)
+    time_spans["1_month"] = timedelta(weeks=4)
+    time_spans["1_week"] = timedelta(weeks=1)
+    time_spans["1_day"] = timedelta(days=1)
+    time_spans["1_hour"] = timedelta(hours=1)
+    time_spans["10_minutes"] = timedelta(minutes=10)
+
     return time_spans
 
 
@@ -1591,35 +1295,35 @@ def main():
     print("Starting new iteration!")        
     print("Reloading master file...")
 
-    print("Making loss and system metric plots...")
-    print("\t Making server stats plots...")
-    plot_system_stats("my_pc_stats.csv", "system_stats_plot.png")
-    print("\t Making RPi stats plots...")
-    plot_system_metrics("system_usage.csv", "system_metrics_plot.png")
-
 
     print("Appending new data...")
     master_data = load_master_data(MASTER_FILE)
-    #master_data = append_new_data(master_data)
+
     master_data.loc[master_data["BMP_Temperature_C"] < 0, "DHT_Temperature_C"] *= -1
     master_data["DHT_Temperature_C"] = master_data["DHT_Temperature_C"] + temp_offset
     master_data["BMP_Temperature_C"] = master_data["BMP_Temperature_C"] + temp_offset
 
-    forecaster = WeatherForecaster(master_file=MASTER_FILE, input_dim=48, hidden_dim=128, num_layers=6, batch_size=256, target_seq_length=3600)
+    forecaster = WeatherForecaster(master_file=MASTER_FILE, input_dim=48, hidden_dim=128, num_layers=6, batch_size=250, target_seq_length=3600)
     # Define the model file path
     model_path = "/media/bigdata/weather_station/weather_model.pth"
     #forecaster.train_model(epochs=2);forecaster.save_model(model_path)
     # Check if the model file exists and is recent
+    current_time = datetime.now()
+    current_hour = current_time.hour
     if os.path.exists(model_path):
         # Get the last modification time of the file
         file_mod_time = datetime.fromtimestamp(os.path.getmtime(model_path))
         # Check if the file is older than a day
-        if datetime.now() - file_mod_time > timedelta(days=1):
-            print("Model file is older than a day. Retraining the model...")
-            forecaster.train_model(epochs=300)
-            forecaster.save_model(model_path)
-            plot_training_loss("training_loss.csv", "training_loss_plot.png")
-            plot_final_losses("final_losses.csv", "final_losses_plot.png")
+        if current_time - file_mod_time > timedelta(days=1):
+            if 4 <= current_hour < 5:
+                print("Model file is older than a day. Retraining the model...")
+                forecaster.train_model(epochs=300)
+                forecaster.save_model(model_path)
+                forecaster.plot_training_loss("training_loss.csv", "training_loss_plot.png")
+                forecaster.plot_final_losses("final_losses.csv", "final_losses_plot.png")
+            else:
+                print("Model file is outdated but it's outside of training hours. Will train at 4AM.")
+
         else:
             print("Model file is up-to-date. Loading the model...")
             forecaster.load_model(model_path)
@@ -1632,21 +1336,15 @@ def main():
 
     file_infer_time = datetime.fromtimestamp(os.path.getmtime(PREDICT_FILE))
     if True:#datetime.now() - file_infer_time > timedelta(minutes=9):
+        steps_ahead=600
         print("Running temp inference...")
-        # Proceed with inference
-        steps_ahead = 6000
+        # Use load_master_data to get interpolated, resampled data
         recent_data = forecaster.load_master_data()
-        timestamps = pd.to_datetime(recent_data["Timestamp"])  # Convert to datetime
-        last_timestamp = timestamps.iloc[-1]  # The most recent timestamp
+        timestamps = pd.to_datetime(recent_data["Timestamp"])  # Already interpolated!
+        last_timestamp = timestamps.iloc[-1]
         data = recent_data[["DHT_Humidity_percent", "BMP_Temperature_C", "BMP_Pressure_hPa"]].values
         seq_length = forecaster.seq_length
-        # Scale recent data using the training scale
-        last_sequence = data[-forecaster.seq_length:]
-        #last_sequence[:, 1] = ((last_sequence[:, 1] - forecaster.temp_min) / (forecaster.temp_max - forecaster.temp_min))
-        #last_sequence[:, 0] = ((last_sequence[:, 0] - forecaster.hum_min) / (forecaster.hum_max - forecaster.hum_min))
-        #last_sequence[:, 2] = ((last_sequence[:, 2] - forecaster.pres_min) / (forecaster.pres_max - forecaster.pres_min))
-        # Prepare recent sequence
-
+        last_sequence = data[-seq_length:]
         predictions = forecaster.predict_future(last_sequence, steps_ahead=steps_ahead)
         # Infer future timestamps
         interval_seconds = (timestamps.iloc[-1] - timestamps.iloc[-2]).total_seconds()
@@ -1680,14 +1378,13 @@ def main():
     numeric_cols = master_data.select_dtypes(include=[np.number]).columns
     master_data[numeric_cols] = master_data[numeric_cols].replace([np.inf, -np.inf], np.nan)
 
-    # Drop rows with NaNs in any column
-    master_data.dropna(inplace=True)
+    # Impute missing values in numeric columns with the median
+    master_data[numeric_cols] = master_data[numeric_cols].fillna(master_data[numeric_cols].median())
 
     # Reset index for a clean DataFrame
     master_data.reset_index(drop=True, inplace=True)
 
-    # Optional: Verify no remaining NaNs or infinities in numeric columns
-    assert not master_data[numeric_cols].isnull().values.any(), "DataFrame still contains NaN values."
+    # Verify no remaining infinities in numeric columns
     assert not np.isinf(master_data[numeric_cols].values).any(), "DataFrame still contains infinite values."
 
         
@@ -1708,27 +1405,43 @@ def main():
         print("!!! PLEASE CHECK THE FILE STREAM/RPI !!!")
         out_of_date_flag = 1
 
-    print("\tDetecting birds...")
-    BIRD_IMAGE_DIR = os.path.join(IMAGE_DIR, "birds")
-    detect_birds_in_images_gif(IMAGE_DIR, BIRD_IMAGE_DIR)
-        
+
     for label, delta in time_spans.items():
         print("\tGenerating plots...")
         # Use the maximum timestamp in the master_data DataFrame
         # Subset the data based on the maximum timestamp
-        subset = master_data[master_data["Timestamp"] >= max_timestamp - delta]
+        subset = master_data[master_data["Timestamp"] >= max_timestamp - delta].copy()
         #subset = master_data[master_data["Timestamp"] >= master_data["Timestamp"].max() - delta]
         generate_plots(subset, predict_data, f"/media/bigdata/weather_station/weather_plot_{label}.png", f"Weather Data ({label.replace('_', ' ').title()})", out_of_date_flag)
 
     print("\tGenerating hourly GIF...")
-    #generate_hourly_gif(IMAGE_DIR, GIF_OUTPUT)
     generate_hourly_gif_with_plot(IMAGE_DIR, GIF_OUTPUT, master_data)
 
 
     generate_summary_plot(master_data, f"/media/bigdata/weather_station/summary_plot.png")
-    print("\t\tCalculating rolling averages...")
+    #print("\t\tCalculating rolling averages...")
     #calculate_rolling_averages(master_data, time_spans)
     save_last_minute_averages(master_data, predict_data, "/media/bigdata/weather_station/small_summary.html")
+
+    print("\tDetecting birds...")
+    BIRD_IMAGE_DIR = os.path.join(IMAGE_DIR, "birds")
+    
+    bird_detection.run_detection_pipeline(
+        image_dir=IMAGE_DIR,
+        output_dir=BIRD_IMAGE_DIR,
+        confidence_threshold=0.35,
+        log_file="images/birds/processed_images.json",
+        hours_back=2,
+        target_classes = ['bird', 'squirrel', 'cat', 'rabbit', 'fox', 'deer', 'raccoon', 'skunk', 'coyote', 'mouse', 'vole', 'chipmunk', 'prairie dog', 'badger', 'weasel','hawk', 'owl', 'magpie', 'crow', 'raven', 'turkey', 'woodpecker']
+    )
+    #bot=bot,
+
+
+    print("Making loss and system metric plots...")
+    print("\t Making server stats plots...")
+    plot_system_stats("my_pc_stats.csv", "system_stats_plot.png")
+    print("\t Making RPi stats plots...")
+    plot_system_metrics("system_usage.csv", "system_metrics_plot.png")
 
 
 
