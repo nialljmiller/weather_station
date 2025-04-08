@@ -1,3 +1,10 @@
+# Ignore everything by default
+/*
+
+# Allow specific directories
+!/weather_station/
+!/plant_station/
+
 # Ignore image files
 *.png
 *.jpg
