@@ -1,6 +1,7 @@
 # Standard Library Imports
 import re
 import os
+import shutil
 import csv
 import json
 import time
@@ -186,6 +187,36 @@ def initialize_csv(output_file="system_stats.csv"):
         ])
         
         
+
+
+
+
+
+def save_latest_copy(image_dir, output_name="latest.jpg"):
+    """
+    Creates a copy of the most recent weather plot as 'latest.jpg'
+    
+    This function should be called right after generating a new weather plot.
+    """
+
+    # Get all image files
+    image_files = glob.glob(os.path.join(image_dir, "*.jpg"))
+    
+    if not image_files:
+        print("No image files found.")
+        return False
+    
+    # Find the most recent file based on modification time
+    latest_file = max(image_files, key=os.path.getmtime)
+    
+    # Create the output path
+    output_path = os.path.join(image_dir, output_name)
+    
+    # Copy the file
+    shutil.copy2(latest_file, output_path)
+    print(f"Copied {latest_file} to {output_path}")
+    return True
+
 
 def gather_system_stats(output_file="system_stats.csv"):
     """Appends detailed system stats to the CSV file."""
@@ -1397,6 +1428,11 @@ def main():
     print(f"File's last timestamp: {max_timestamp}")
     print(f"Current time: {current_time}")
     print(f"Time since last data update: {time_difference}")
+
+
+    save_latest_copy(image_dir = IMAGE_DIR)
+
+
 
     out_of_date_flag = 0
     if time_difference > timedelta(hours=1):
