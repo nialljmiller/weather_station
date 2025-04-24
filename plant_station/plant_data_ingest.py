@@ -1,12 +1,38 @@
 import pandas as pd
 import os
-import tempfile
 import shutil
+import glob
+from datetime import datetime
 
 # File paths
 plant_data_file = "/media/bigdata/plant_station/plant_data.csv"
 all_plant_data_file = "/media/bigdata/plant_station/all_plant_data.csv"
 temp_file = "/media/bigdata/plant_station/all_plant_data.temp.csv"
+images_dir = "images"
+latest_image_path = os.path.join(images_dir, "latest.jpg")
+
+def save_latest_image():
+    """
+    Finds the most recent image in the images directory and
+    copies it to images/latest.jpg.
+    """
+    # Get all jpg files in the images directory
+    image_files = glob.glob(os.path.join(images_dir, "*.jpg"))
+    
+    # Filter out 'latest.jpg' itself to avoid copying it to itself
+    image_files = [f for f in image_files if os.path.basename(f) != "latest.jpg"]
+    
+    if not image_files:
+        print("No image files found in the images directory.")
+        return False
+    
+    # Find the most recent file based on modification time
+    latest_file = max(image_files, key=os.path.getmtime)
+    
+    # Copy the file
+    shutil.copy2(latest_file, latest_image_path)
+    print(f"Copied {latest_file} to {latest_image_path}")
+    return True
 
 def append_new_data():
     # Ensure the plant data file exists
@@ -40,5 +66,7 @@ def append_new_data():
 
     print(f"Updated {all_plant_data_file} with new data.")
 
-# Run the function to append new data
-append_new_data()
+# Run the functions
+if __name__ == "__main__":
+    append_new_data()
+    save_latest_image()
