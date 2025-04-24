@@ -1,9 +1,12 @@
 import pandas as pd
 import os
+import tempfile
+import shutil
 
 # File paths
 plant_data_file = "/media/bigdata/plant_station/plant_data.csv"
 all_plant_data_file = "/media/bigdata/plant_station/all_plant_data.csv"
+temp_file = "/media/bigdata/plant_station/all_plant_data.temp.csv"
 
 def append_new_data():
     # Ensure the plant data file exists
@@ -25,13 +28,15 @@ def append_new_data():
 
         # Find new entries by comparing timestamps
         df_merged = pd.concat([df_all, df_new]).drop_duplicates(subset=["Timestamp"]).sort_values("Timestamp")
-
     else:
         # If no all-time data exists, create it from the new data
         df_merged = df_new
 
-    # Save updated dataset
-    df_merged.to_csv(all_plant_data_file, index=False)
+    # Write to temporary file first
+    df_merged.to_csv(temp_file, index=False)
+    
+    # Atomically replace the original file
+    shutil.move(temp_file, all_plant_data_file)
 
     print(f"Updated {all_plant_data_file} with new data.")
 
