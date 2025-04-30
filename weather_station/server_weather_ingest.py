@@ -299,7 +299,7 @@ def main():
 
     #local_stats_file = "my_pc_stats.csv"
     # Uncomment the next line if you wish to initialize the stats CSV with headers.
-    # initialize_csv(local_stats_file)
+    #initialize_csv(local_stats_file)
     #gather_system_stats(local_stats_file)
     #logging.info("Appending new weather data...")
     master_data = load_master_data(MASTER_FILE)

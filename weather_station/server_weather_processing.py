@@ -1429,9 +1429,10 @@ def main():
     print(f"Current time: {current_time}")
     print(f"Time since last data update: {time_difference}")
 
-
-    save_latest_copy(image_dir = IMAGE_DIR)
-
+    try:
+        save_latest_copy(image_dir = IMAGE_DIR)
+    except:
+        pass
 
 
     out_of_date_flag = 0
