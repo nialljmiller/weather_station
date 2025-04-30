@@ -8,7 +8,7 @@ from datetime import datetime
 plant_data_file = "/media/bigdata/plant_station/plant_data.csv"
 all_plant_data_file = "/media/bigdata/plant_station/all_plant_data.csv"
 temp_file = "/media/bigdata/plant_station/all_plant_data.temp.csv"
-images_dir = "images"
+images_dir = "/media/bigdata/plant_station/images"
 latest_image_path = os.path.join(images_dir, "latest.jpg")
 
 def save_latest_image():
