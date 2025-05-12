@@ -26,6 +26,7 @@ from email.mime.image import MIMEImage
 # --- Configuration ---
 SMTP_USER = "cirrus.noreply@gmail.com"
 SMTP_PASS = "jnlaisebvidlrioh"
+EMAILS_TO = ["niall.j.miller@gmail.com","kkatherinegmiller@gmail.com"]
 EMAIL_TO = "niall.j.miller@gmail.com"
 
 # File paths
@@ -284,12 +285,14 @@ def check_weather_data_age():
 
 # Add more check functions here for future alert conditions
 
-def send_email_with_images(subject, body, image_paths=None):
+def send_email_with_images(subject, body, email_to = None, image_paths=None):
     """Send email with text and optional attached images."""
     msg = MIMEMultipart()
     msg["Subject"] = subject
     msg["From"] = SMTP_USER
-    msg["To"] = EMAIL_TO
+
+    if email_to == None:
+        msg["To"] = EMAIL_TO
     
     # Attach the text body
     msg.attach(MIMEText(body, "plain"))
@@ -341,7 +344,9 @@ PLANT STATION ALERT
 
 This automatic alert was generated at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         """
-        sent = send_email_with_images(subject, email_body)
+        for cur_email in EMAILS_TO:
+            sent = send_email_with_images(subject, email_body, email_to = cur_email)
+
         log_alert("HIGH_TEMP", message, sent)
     else:
         print("Temperature normal, no alerts.")
@@ -362,7 +367,9 @@ upload new data. Please check the system.
 
 This automatic alert was generated at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         """
-        sent = send_email_with_images(subject, email_body)
+        for cur_email in EMAILS_TO:
+            sent = send_email_with_images(subject, email_body, email_to = cur_email)
+        
         log_alert("PLANT_DATA_AGE", message, sent)
     else:
         print("Plant data file age normal, no alerts.")
@@ -383,7 +390,9 @@ upload new data. Please check the system.
 
 This automatic alert was generated at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         """
-        sent = send_email_with_images(subject, email_body)
+        for cur_email in EMAILS_TO:
+            sent = send_email_with_images(subject, email_body, email_to = cur_email)
+        
         log_alert("WEATHER_DATA_AGE", message, sent)
     else:
         print("Weather data file age normal, no alerts.")
@@ -414,13 +423,9 @@ Generated at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
 Note: The most recent images from both stations are attached to this email.
         """
-        
-        # Send email with images
-        sent = send_email_with_images(
-            subject, 
-            email_body, 
-            [weather_image, plant_image]
-        )
+        for cur_email in EMAILS_TO:
+            sent = send_email_with_images(subject, email_body, email_to = cur_email, image_paths= [weather_image, plant_image])
+
         log_alert("DAILY_SUMMARY", message, sent)
         print("Daily summary email sent.")
     
