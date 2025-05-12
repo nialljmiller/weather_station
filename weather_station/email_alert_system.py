@@ -23,6 +23,16 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 
+
+def get_subscribers(file_path='/media/bigdata/subscribers.txt'):
+    try:
+        with open(file_path, 'r') as f:
+            return [line.strip() for line in f if line.strip()]
+    except FileNotFoundError:
+        return [EMAIL_TO]
+
+
+
 # --- Configuration ---
 SMTP_USER = "cirrus.noreply@gmail.com"
 SMTP_PASS = "jnlaisebvidlrioh"
@@ -47,13 +57,6 @@ MAX_FILE_AGE_HOURS = 1.0    # Maximum file age in hours
 
 # --- Utility Functions ---
 
-
-def get_subscribers(file_path='/media/bigdata/subscribers.txt'):
-    try:
-        with open(file_path, 'r') as f:
-            return [line.strip() for line in f if line.strip()]
-    except FileNotFoundError:
-        return [EMAIL_TO]
 
 
 def get_latest_image(image_dir):
