@@ -10,6 +10,34 @@ import logging
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
 
+def run_email_alerts():
+    """Runs the email alert system script once per hour."""
+    while True:
+        try:
+            # Run the email alert system script
+            subprocess.run(["python", "email_alert_system.py"], check=True)
+            logging.info("Email alert check completed. Next check in 1 hour.")
+            
+            # Wait for 1 hour before running again (3600 seconds)
+            wait_time = 3600
+            
+        except subprocess.CalledProcessError as e:
+            wait_time = 300  # 5 minutes if there was an error
+            logging.error(f"Email alert script crashed with exit code {e.returncode}. Restarting in {wait_time} seconds...")
+        except Exception as e:
+            wait_time = 300  # 5 minutes if there was an error
+            logging.error(f"Unexpected error in email alert script: {e}. Restarting in {wait_time} seconds...")
+        
+        clean_ram()
+        kill_zombie_processes()
+
+        # Countdown timer before next run
+        for remaining in range(wait_time, 0, -1):
+            if remaining % 60 == 0:  # Only print every minute to reduce console spam
+                print(f"Next email alert check in {remaining//60} minutes...", end="\r", flush=True)
+            time.sleep(1)
+        print("Running email alerts now!                               ")
+
 def clean_ram():
     """Attempt to free up memory by running garbage collection."""
     gc.collect()
@@ -133,6 +161,7 @@ if __name__ == "__main__":
         threading.Thread(target=plant_plot),
         threading.Thread(target=plant_ingest),
         threading.Thread(target=run_processing),
+        threading.Thread(target=run_email_alerts),  # Add the new thread
     ]
 
     # Start all threads
