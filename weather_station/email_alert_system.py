@@ -293,7 +293,7 @@ def send_email_with_images(subject, body, email_to = None, image_paths=None):
 
     if email_to == None:
         msg["To"] = EMAIL_TO
-    
+    print(msg["To"])
     # Attach the text body
     msg.attach(MIMEText(body, "plain"))
     
