@@ -36,7 +36,7 @@ def get_subscribers(file_path='/media/bigdata/subscribers.txt'):
 # --- Configuration ---
 SMTP_USER = "cirrus.noreply@gmail.com"
 SMTP_PASS = "jnlaisebvidlrioh"
-SUB_EMAILS = get_subscribers(file_path='/media/bigdata/subscribers.txt')
+SUB_EMAILS_TO = get_subscribers(file_path='/media/bigdata/subscribers.txt')
 EMAILS_TO = ["niall.j.miller@gmail.com","kkatherinegmiller@gmail.com"]
 EMAIL_TO = "niall.j.miller@gmail.com"
 print("Total of email subscribers:", len(SUB_EMAILS))
