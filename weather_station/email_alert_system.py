@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Alert System - Sends email notifications when plant station conditions require attention.
+Alert System - Sends email notifications for plant station conditions and daily summaries.
 
-Currently implemented alerts:
+Implemented alerts:
 1. High temperature alert (40°C or higher)
+2. Daily summary of weather and plant data with recent images
 
 This script can be run manually and later automated.
 """
@@ -11,9 +12,14 @@ This script can be run manually and later automated.
 import os
 import sys
 import pandas as pd
+import numpy as np
 import datetime
 import smtplib
+import glob
+import base64
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
 
 # --- Configuration ---
 SMTP_USER = "cirrus.noreply@gmail.com"
@@ -22,10 +28,167 @@ EMAIL_TO = "niall.j.miller@gmail.com"
 
 # File paths
 PLANT_DATA_PATH = "/media/bigdata/plant_station/all_plant_data.csv"
+WEATHER_DATA_PATH = "/media/bigdata/weather_station/all_data.csv"
 ALERT_LOG_PATH = "/media/bigdata/plant_station/alerts.log"
+
+# Image directories
+PLANT_IMAGE_DIR = "/media/bigdata/plant_station/images/"
+WEATHER_IMAGE_DIR = "/media/bigdata/weather_station/images/"
 
 # Alert thresholds
 HIGH_TEMP_THRESHOLD = 40.0  # in Celsius
+
+# --- Utility Functions ---
+
+def get_latest_image(image_dir):
+    """Get the most recent image from a directory."""
+    try:
+        image_files = glob.glob(os.path.join(image_dir, "*.jpg"))
+        if not image_files:
+            return None
+        
+        # Get the most recent file based on modification time
+        latest_file = max(image_files, key=os.path.getmtime)
+        return latest_file
+    except Exception as e:
+        print(f"Error getting latest image: {e}")
+        return None
+
+def format_value(value):
+    """Format a number for display in the email."""
+    if isinstance(value, (int, float, np.number)):
+        if float(value).is_integer():
+            return str(int(value))
+        return f"{float(value):.2f}"
+    return str(value)
+
+def get_plant_summary():
+    """Generate summary of plant station data."""
+    try:
+        # Load plant data
+        df = pd.read_csv(PLANT_DATA_PATH)
+        df["Timestamp"] = pd.to_datetime(df["Timestamp"])
+        
+        # Get most recent data and last 24 hours
+        df = df.sort_values("Timestamp", ascending=False)
+        recent = df.iloc[0]
+        last_24h = df[df["Timestamp"] >= (df["Timestamp"].max() - pd.Timedelta(hours=24))]
+        
+        # Calculate statistics
+        temp_current = recent["Temperature_C"]
+        temp_max = last_24h["Temperature_C"].max()
+        temp_min = last_24h["Temperature_C"].min()
+        temp_avg = last_24h["Temperature_C"].mean()
+        
+        humidity_current = recent["Humidity_percent"]
+        humidity_avg = last_24h["Humidity_percent"].mean()
+        
+        pressure_current = recent["Pressure_hPa"]
+        pressure_avg = last_24h["Pressure_hPa"].mean()
+        
+        # Soil moisture info
+        soil_moisture = []
+        for i in range(1, 5):
+            col = f"Soil_Moisture_{i}"
+            if col in recent:
+                current = recent[col]
+                avg = last_24h[col].mean()
+                soil_moisture.append((i, current, avg))
+        
+        # Create summary text
+        summary = f"""
+PLANT STATION SUMMARY
+=====================
+Current Time: {recent['Timestamp'].strftime('%Y-%m-%d %H:%M:%S')}
+
+Temperature:
+  Current: {format_value(temp_current)}°C ({format_value(temp_current * 9/5 + 32)}°F)
+  24h Max: {format_value(temp_max)}°C ({format_value(temp_max * 9/5 + 32)}°F)
+  24h Min: {format_value(temp_min)}°C ({format_value(temp_min * 9/5 + 32)}°F)
+  24h Avg: {format_value(temp_avg)}°C ({format_value(temp_avg * 9/5 + 32)}°F)
+
+Humidity:
+  Current: {format_value(humidity_current)}%
+  24h Avg: {format_value(humidity_avg)}%
+
+Pressure:
+  Current: {format_value(pressure_current)} hPa
+  24h Avg: {format_value(pressure_avg)} hPa
+"""
+        
+        # Add soil moisture data if available
+        if soil_moisture:
+            summary += "\nSoil Moisture:\n"
+            for i, current, avg in soil_moisture:
+                summary += f"  Sensor {i}: Current {format_value(current)}, 24h Avg {format_value(avg)}\n"
+        
+        return summary
+    except Exception as e:
+        return f"Error generating plant summary: {str(e)}"
+
+def get_weather_summary():
+    """Generate summary of weather station data."""
+    try:
+        # Load weather data
+        df = pd.read_csv(WEATHER_DATA_PATH)
+        df["Timestamp"] = pd.to_datetime(df["Timestamp"])
+        
+        # Get most recent data and last 24 hours
+        df = df.sort_values("Timestamp", ascending=False)
+        recent = df.iloc[0]
+        last_24h = df[df["Timestamp"] >= (df["Timestamp"].max() - pd.Timedelta(hours=24))]
+        
+        # Calculate statistics
+        bmp_temp_current = recent["BMP_Temperature_C"]
+        bmp_temp_max = last_24h["BMP_Temperature_C"].max()
+        bmp_temp_min = last_24h["BMP_Temperature_C"].min()
+        bmp_temp_avg = last_24h["BMP_Temperature_C"].mean()
+        
+        dht_temp_current = recent["DHT_Temperature_C"]
+        dht_temp_avg = last_24h["DHT_Temperature_C"].mean()
+        
+        humidity_current = recent["DHT_Humidity_percent"]
+        humidity_avg = last_24h["DHT_Humidity_percent"].mean()
+        
+        pressure_current = recent["BMP_Pressure_hPa"]
+        pressure_avg = last_24h["BMP_Pressure_hPa"].mean()
+        
+        light_current = recent["BH1750_Light_lx"]
+        light_avg = last_24h["BH1750_Light_lx"].mean()
+        light_max = last_24h["BH1750_Light_lx"].max()
+        
+        # Create summary text
+        summary = f"""
+WEATHER STATION SUMMARY
+======================
+Current Time: {recent['Timestamp'].strftime('%Y-%m-%d %H:%M:%S')}
+
+BMP Temperature:
+  Current: {format_value(bmp_temp_current)}°C ({format_value(bmp_temp_current * 9/5 + 32)}°F)
+  24h Max: {format_value(bmp_temp_max)}°C ({format_value(bmp_temp_max * 9/5 + 32)}°F)
+  24h Min: {format_value(bmp_temp_min)}°C ({format_value(bmp_temp_min * 9/5 + 32)}°F)
+  24h Avg: {format_value(bmp_temp_avg)}°C ({format_value(bmp_temp_avg * 9/5 + 32)}°F)
+
+DHT Temperature:
+  Current: {format_value(dht_temp_current)}°C ({format_value(dht_temp_current * 9/5 + 32)}°F)
+  24h Avg: {format_value(dht_temp_avg)}°C ({format_value(dht_temp_avg * 9/5 + 32)}°F)
+
+Humidity:
+  Current: {format_value(humidity_current)}%
+  24h Avg: {format_value(humidity_avg)}%
+
+Pressure:
+  Current: {format_value(pressure_current)} hPa
+  24h Avg: {format_value(pressure_avg)} hPa
+
+Light Level:
+  Current: {format_value(light_current)} lx
+  24h Max: {format_value(light_max)} lx
+  24h Avg: {format_value(light_avg)} lx
+"""
+        return summary
+    except Exception as e:
+        return f"Error generating weather summary: {str(e)}"
 
 # --- Alert Functions ---
 
@@ -53,17 +216,43 @@ def check_high_temperature():
     except Exception as e:
         return True, f"ERROR checking temperature: {str(e)}"
 
-# Add more check functions here for future alert conditions
-# def check_other_condition():
-#     ...
+def check_daily_summary():
+    """
+    Trigger for sending the daily summary email.
+    This function always returns True to ensure the summary is sent when requested.
+    
+    Returns: (bool, str) - Alert triggered, Alert message
+    """
+    # For manual triggering, always return True
+    message = f"Daily summary report for {datetime.datetime.now().strftime('%Y-%m-%d')}"
+    return True, message
 
-def send_email(subject, body):
-    """Send email alert."""
-    msg = MIMEText(body)
+# Add more check functions here for future alert conditions
+
+def send_email_with_images(subject, body, image_paths=None):
+    """Send email with text and optional attached images."""
+    msg = MIMEMultipart()
     msg["Subject"] = subject
     msg["From"] = SMTP_USER
     msg["To"] = EMAIL_TO
-
+    
+    # Attach the text body
+    msg.attach(MIMEText(body, "plain"))
+    
+    # Attach images if provided
+    if image_paths:
+        for i, img_path in enumerate(image_paths):
+            if img_path and os.path.exists(img_path):
+                try:
+                    with open(img_path, 'rb') as img_file:
+                        img_data = img_file.read()
+                        img = MIMEImage(img_data)
+                        img_name = os.path.basename(img_path)
+                        img.add_header('Content-Disposition', f'attachment; filename="{img_name}"')
+                        msg.attach(img)
+                except Exception as e:
+                    print(f"Error attaching image {img_path}: {e}")
+    
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
             s.login(SMTP_USER, SMTP_PASS)
@@ -97,14 +286,48 @@ PLANT STATION ALERT
 
 This automatic alert was generated at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         """
-        sent = send_email(subject, email_body)
+        sent = send_email_with_images(subject, email_body)
         log_alert("HIGH_TEMP", message, sent)
     else:
         print("Temperature normal, no alerts.")
     
-    # Add more conditions here
-    # e.g., if check_other_condition():
-    #          ...
+    # Check for daily summary (always triggers when run)
+    triggered, message = check_daily_summary()
+    if triggered:
+        print("Generating daily summary report...")
+        
+        # Generate summaries
+        plant_summary = get_plant_summary()
+        weather_summary = get_weather_summary()
+        
+        # Get latest images
+        plant_image = get_latest_image(PLANT_IMAGE_DIR)
+        weather_image = get_latest_image(WEATHER_IMAGE_DIR)
+        
+        # Build email body
+        subject = f"Daily Plant & Weather Summary - {datetime.datetime.now().strftime('%Y-%m-%d')}"
+        email_body = f"""
+DAILY SUMMARY REPORT
+===================
+Generated at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+{weather_summary}
+
+{plant_summary}
+
+Note: The most recent images from both stations are attached to this email.
+        """
+        
+        # Send email with images
+        sent = send_email_with_images(
+            subject, 
+            email_body, 
+            [weather_image, plant_image]
+        )
+        log_alert("DAILY_SUMMARY", message, sent)
+        print("Daily summary email sent.")
+    
+    # Add more conditions here for future alerts
         
     print("Alert check completed.")
 
