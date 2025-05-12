@@ -39,7 +39,7 @@ SMTP_PASS = "jnlaisebvidlrioh"
 SUB_EMAILS_TO = get_subscribers(file_path='/media/bigdata/subscribers.txt')
 EMAILS_TO = ["niall.j.miller@gmail.com","kkatherinegmiller@gmail.com"]
 EMAIL_TO = "niall.j.miller@gmail.com"
-print("Total of email subscribers:", len(SUB_EMAILS))
+print("Total of email subscribers:", len(SUB_EMAILS_TO))
 # File paths
 PLANT_DATA_PATH = "/media/bigdata/plant_station/all_plant_data.csv"
 WEATHER_DATA_PATH = "/media/bigdata/weather_station/all_data.csv"
