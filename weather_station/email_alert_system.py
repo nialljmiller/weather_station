@@ -56,7 +56,6 @@ HIGH_TEMP_THRESHOLD = 40.0  # in Celsius
 MAX_FILE_AGE_HOURS = 1.0    # Maximum file age in hours
 
 # --- Utility Functions ---
-
 def check_daily_summary():
     """
     Trigger for sending the daily summary email.
@@ -83,7 +82,7 @@ def check_daily_summary():
                 # If less than 12 hours have passed, don't send a new summary
                 if time_elapsed < datetime.timedelta(hours=12):
                     print(f"Skipping daily summary - last one sent {time_elapsed.total_seconds() / 3600:.1f} hours ago")
-                    return False
+                    return False, f"Daily summary was sent less than 12 hours ago"
         except Exception as e:
             # If there's an error reading the file, log it and proceed to send a summary
             print(f"Error reading last summary timestamp: {e}")
@@ -96,7 +95,9 @@ def check_daily_summary():
     except Exception as e:
         print(f"Error updating last summary timestamp: {e}")
     
-    return True
+    # Return True to trigger sending the summary
+    message = f"Daily summary report for {now.strftime('%Y-%m-%d')}"
+    return True, message
 
 def get_latest_image(image_dir):
     """Get the most recent image from a directory."""
