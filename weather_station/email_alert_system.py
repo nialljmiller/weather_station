@@ -424,6 +424,7 @@ Generated at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Note: The most recent images from both stations are attached to this email.
         """
         for cur_email in EMAILS_TO:
+            print(cur_email)
             sent = send_email_with_images(subject, email_body, email_to = cur_email, image_paths= [weather_image, plant_image])
 
         log_alert("DAILY_SUMMARY", message, sent)
