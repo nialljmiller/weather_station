@@ -26,6 +26,7 @@ from email.mime.image import MIMEImage
 # --- Configuration ---
 SMTP_USER = "cirrus.noreply@gmail.com"
 SMTP_PASS = "jnlaisebvidlrioh"
+SUB_EMAILS = get_subscribers(file_path='/media/bigdata/subscribers.txt')
 EMAILS_TO = ["niall.j.miller@gmail.com","kkatherinegmiller@gmail.com"]
 EMAIL_TO = "niall.j.miller@gmail.com"
 
@@ -45,6 +46,15 @@ HIGH_TEMP_THRESHOLD = 40.0  # in Celsius
 MAX_FILE_AGE_HOURS = 1.0    # Maximum file age in hours
 
 # --- Utility Functions ---
+
+
+def get_subscribers(file_path='/media/bigdata/subscribers.txt'):
+    try:
+        with open(file_path, 'r') as f:
+            return [line.strip() for line in f if line.strip()]
+    except FileNotFoundError:
+        return [EMAIL_TO]
+
 
 def get_latest_image(image_dir):
     """Get the most recent image from a directory."""
