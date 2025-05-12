@@ -57,7 +57,46 @@ MAX_FILE_AGE_HOURS = 1.0    # Maximum file age in hours
 
 # --- Utility Functions ---
 
-
+def check_daily_summary():
+    """
+    Trigger for sending the daily summary email.
+    This function returns True only if the last summary was sent more than 12 hours ago.
+    
+    Returns: (bool, str) - Alert triggered, Alert message
+    """
+    # Define the path to the file that will store the last sent timestamp
+    last_summary_file = "/media/bigdata/plant_station/last_daily_summary.txt"
+    
+    # Current time
+    now = datetime.datetime.now()
+    
+    # Check if the file exists and read the last sent timestamp
+    if os.path.exists(last_summary_file):
+        try:
+            with open(last_summary_file, "r") as f:
+                last_sent_str = f.read().strip()
+                last_sent = datetime.datetime.fromisoformat(last_sent_str)
+                
+                # Calculate the time elapsed since the last summary
+                time_elapsed = now - last_sent
+                
+                # If less than 12 hours have passed, don't send a new summary
+                if time_elapsed < datetime.timedelta(hours=12):
+                    print(f"Skipping daily summary - last one sent {time_elapsed.total_seconds() / 3600:.1f} hours ago")
+                    return False
+        except Exception as e:
+            # If there's an error reading the file, log it and proceed to send a summary
+            print(f"Error reading last summary timestamp: {e}")
+    
+    # If we get here, either the file doesn't exist, or more than 12 hours have passed
+    # Update the timestamp file
+    try:
+        with open(last_summary_file, "w") as f:
+            f.write(now.isoformat())
+    except Exception as e:
+        print(f"Error updating last summary timestamp: {e}")
+    
+    return True
 
 def get_latest_image(image_dir):
     """Get the most recent image from a directory."""
@@ -234,17 +273,6 @@ def check_high_temperature():
         return False, ""
     except Exception as e:
         return True, f"ERROR checking temperature: {str(e)}"
-
-def check_daily_summary():
-    """
-    Trigger for sending the daily summary email.
-    This function always returns True to ensure the summary is sent when requested.
-    
-    Returns: (bool, str) - Alert triggered, Alert message
-    """
-    # For manual triggering, always return True
-    message = f"Daily summary report for {datetime.datetime.now().strftime('%Y-%m-%d')}"
-    return True, message
 
 def check_plant_data_age():
     """
