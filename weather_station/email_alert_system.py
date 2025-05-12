@@ -5,6 +5,8 @@ Alert System - Sends email notifications for plant station conditions and daily 
 Implemented alerts:
 1. High temperature alert (40°C or higher)
 2. Daily summary of weather and plant data with recent images
+3. Plant station data file age alert (>1 hour old)
+4. Weather station data file age alert (>1 hour old)
 
 This script can be run manually and later automated.
 """
@@ -29,6 +31,8 @@ EMAIL_TO = "niall.j.miller@gmail.com"
 # File paths
 PLANT_DATA_PATH = "/media/bigdata/plant_station/all_plant_data.csv"
 WEATHER_DATA_PATH = "/media/bigdata/weather_station/all_data.csv"
+PLANT_CURRENT_DATA_PATH = "/media/bigdata/plant_station/plant_data.csv"
+WEATHER_CURRENT_DATA_PATH = "/media/bigdata/weather_station/weather_data.csv"
 ALERT_LOG_PATH = "/media/bigdata/plant_station/alerts.log"
 
 # Image directories
@@ -37,6 +41,7 @@ WEATHER_IMAGE_DIR = "/media/bigdata/weather_station/images/"
 
 # Alert thresholds
 HIGH_TEMP_THRESHOLD = 40.0  # in Celsius
+MAX_FILE_AGE_HOURS = 1.0    # Maximum file age in hours
 
 # --- Utility Functions ---
 
@@ -227,6 +232,56 @@ def check_daily_summary():
     message = f"Daily summary report for {datetime.datetime.now().strftime('%Y-%m-%d')}"
     return True, message
 
+def check_plant_data_age():
+    """
+    Check if plant station data file is older than the threshold.
+    
+    Returns: (bool, str) - Alert triggered, Alert message
+    """
+    try:
+        if not os.path.exists(PLANT_CURRENT_DATA_PATH):
+            return True, f"PLANT DATA FILE NOT FOUND: {PLANT_CURRENT_DATA_PATH} does not exist."
+        
+        # Get file modification time
+        mod_time = os.path.getmtime(PLANT_CURRENT_DATA_PATH)
+        mod_datetime = datetime.datetime.fromtimestamp(mod_time)
+        now = datetime.datetime.now()
+        age_hours = (now - mod_datetime).total_seconds() / 3600
+        
+        if age_hours > MAX_FILE_AGE_HOURS:
+            message = (f"PLANT DATA AGE ALERT: Plant station data file is {age_hours:.2f} hours old.\n\n"
+                      f"Last update: {mod_datetime.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                      f"This exceeds the threshold of {MAX_FILE_AGE_HOURS} hour(s).")
+            return True, message
+        return False, ""
+    except Exception as e:
+        return True, f"ERROR checking plant data age: {str(e)}"
+
+def check_weather_data_age():
+    """
+    Check if weather station data file is older than the threshold.
+    
+    Returns: (bool, str) - Alert triggered, Alert message
+    """
+    try:
+        if not os.path.exists(WEATHER_CURRENT_DATA_PATH):
+            return True, f"WEATHER DATA FILE NOT FOUND: {WEATHER_CURRENT_DATA_PATH} does not exist."
+        
+        # Get file modification time
+        mod_time = os.path.getmtime(WEATHER_CURRENT_DATA_PATH)
+        mod_datetime = datetime.datetime.fromtimestamp(mod_time)
+        now = datetime.datetime.now()
+        age_hours = (now - mod_datetime).total_seconds() / 3600
+        
+        if age_hours > MAX_FILE_AGE_HOURS:
+            message = (f"WEATHER DATA AGE ALERT: Weather station data file is {age_hours:.2f} hours old.\n\n"
+                      f"Last update: {mod_datetime.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                      f"This exceeds the threshold of {MAX_FILE_AGE_HOURS} hour(s).")
+            return True, message
+        return False, ""
+    except Exception as e:
+        return True, f"ERROR checking weather data age: {str(e)}"
+
 # Add more check functions here for future alert conditions
 
 def send_email_with_images(subject, body, image_paths=None):
@@ -290,6 +345,48 @@ This automatic alert was generated at {datetime.datetime.now().strftime('%Y-%m-%
         log_alert("HIGH_TEMP", message, sent)
     else:
         print("Temperature normal, no alerts.")
+    
+    # Check for plant data age
+    triggered, message = check_plant_data_age()
+    if triggered:
+        print(f"PLANT DATA AGE ALERT: {message}")
+        subject = "ALERT: Plant Station Data File Age"
+        email_body = f"""
+PLANT STATION DATA ALERT
+=======================
+
+{message}
+
+This may indicate that the plant station Raspberry Pi has stopped working or is unable to
+upload new data. Please check the system.
+
+This automatic alert was generated at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        """
+        sent = send_email_with_images(subject, email_body)
+        log_alert("PLANT_DATA_AGE", message, sent)
+    else:
+        print("Plant data file age normal, no alerts.")
+    
+    # Check for weather data age
+    triggered, message = check_weather_data_age()
+    if triggered:
+        print(f"WEATHER DATA AGE ALERT: {message}")
+        subject = "ALERT: Weather Station Data File Age"
+        email_body = f"""
+WEATHER STATION DATA ALERT
+=========================
+
+{message}
+
+This may indicate that the weather station Raspberry Pi has stopped working or is unable to
+upload new data. Please check the system.
+
+This automatic alert was generated at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        """
+        sent = send_email_with_images(subject, email_body)
+        log_alert("WEATHER_DATA_AGE", message, sent)
+    else:
+        print("Weather data file age normal, no alerts.")
     
     # Check for daily summary (always triggers when run)
     triggered, message = check_daily_summary()
