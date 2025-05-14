@@ -9,6 +9,52 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
+                         ")
+
+def clean_ram():
+    """Attempt to free up memory by running garbage collection."""
+    gc.collect()
+    logging.info("Garbage collection completed.")
+
+
+def kill_zombie_processes():
+    """Terminate any zombie processes to release system resources."""
+    for proc in psutil.process_iter(['pid', 'status']):
+        if proc.info['status'] == psutil.STATUS_ZOMBIE:
+            try:
+                os.kill(proc.info['pid'], 9)
+                logging.info(f"Terminated zombie process with PID {proc.info['pid']}")
+            except Exception as ex:
+                logging.error(f"Failed to kill process {proc.info['pid']}: {ex}")
+
+
+
+
+
+
+def run_git_commit():
+    """Runs the git auto-commit script in a loop."""
+    while True:
+        try:
+            subprocess.run(["python", "git_auto_commit.py"], check=True)
+            retry_time = 3600  # 1 hour
+        except subprocess.CalledProcessError as e:
+            retry_time = 300  # 5 minutes
+            logging.error(f"Git auto-commit script crashed with exit code {e.returncode}. Restarting in {retry_time} seconds...")
+        except Exception as e:
+            retry_time = 300  # 5 minutes
+            logging.error(f"Unexpected error in git auto-commit script: {e}. Restarting in {retry_time} seconds...")
+        
+        # Clean up RAM and kill zombie processes
+        clean_ram()
+        kill_zombie_processes()
+
+        # Wait before restarting
+        for remaining in range(retry_time, 0, -1):
+            print(f"Restarting git auto-commit in {remaining} seconds...", end="\r", flush=True)
+            time.sleep(1)
+        print("Restarting now!                               ")
+
 
 def run_email_alerts():
     """Runs the email alert system script once per hour."""
@@ -36,23 +82,10 @@ def run_email_alerts():
             if remaining % 60 == 0:  # Only print every minute to reduce console spam
                 print(f"Next email alert check in {remaining//60} minutes...", end="\r", flush=True)
             time.sleep(1)
-        print("Running email alerts now!                               ")
-
-def clean_ram():
-    """Attempt to free up memory by running garbage collection."""
-    gc.collect()
-    logging.info("Garbage collection completed.")
+        print("Running email alerts now!      
 
 
-def kill_zombie_processes():
-    """Terminate any zombie processes to release system resources."""
-    for proc in psutil.process_iter(['pid', 'status']):
-        if proc.info['status'] == psutil.STATUS_ZOMBIE:
-            try:
-                os.kill(proc.info['pid'], 9)
-                logging.info(f"Terminated zombie process with PID {proc.info['pid']}")
-            except Exception as ex:
-                logging.error(f"Failed to kill process {proc.info['pid']}: {ex}")
+
 
 
 def run_ingest():
@@ -161,8 +194,10 @@ if __name__ == "__main__":
         threading.Thread(target=plant_plot),
         threading.Thread(target=plant_ingest),
         threading.Thread(target=run_processing),
-        threading.Thread(target=run_email_alerts),  # Add the new thread
+        threading.Thread(target=run_email_alerts),
+        threading.Thread(target=run_git_commit)
     ]
+
 
     # Start all threads
     for t in threads:
