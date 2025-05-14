@@ -9,7 +9,7 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
-                         ")
+                   
 
 def clean_ram():
     """Attempt to free up memory by running garbage collection."""
@@ -82,7 +82,7 @@ def run_email_alerts():
             if remaining % 60 == 0:  # Only print every minute to reduce console spam
                 print(f"Next email alert check in {remaining//60} minutes...", end="\r", flush=True)
             time.sleep(1)
-        print("Running email alerts now!      
+        print("Running email alerts now!        ") 
 
 
 
