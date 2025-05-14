@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 REPO_PATH = "/media/bigdata"
 
 # Times to commit each day (24-hour format)
-COMMIT_TIMES = ["10:00", "22:00"]  # 10 AM and 10 PM
+COMMIT_TIMES = ["10:00","12:00", "22:00"]  # 10 AM and 10 PM
 
 def run_git_command(cmd):
     """Execute a git command and return the output."""
