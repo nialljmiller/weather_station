@@ -80,6 +80,7 @@ def smooth_data(df, x_col, y_col, num_bins=100):
     smoothed = smoothed.sort_values("Timestamp")
     return smoothed
 
+
 def plot_with_gaps(ax, x, y, gap_threshold=timedelta(hours=24), **kwargs):
     """
     Plot line segments on ax.
@@ -90,9 +91,17 @@ def plot_with_gaps(ax, x, y, gap_threshold=timedelta(hours=24), **kwargs):
         x = pd.Series(x)
     if not isinstance(y, pd.Series):
         y = pd.Series(y)
+    
+    # Ensure both series have the same length
+    min_length = min(len(x), len(y))
+    if min_length == 0:
+        return  # Nothing to plot
+    
+    x = x.iloc[:min_length].reset_index(drop=True)
+    y = y.iloc[:min_length].reset_index(drop=True)
         
     seg_x, seg_y = [x.iloc[0]], [y.iloc[0]]
-    for i in range(1, len(x)):
+    for i in range(1, min_length):
         if (x.iloc[i] - x.iloc[i-1]) > gap_threshold:
             if len(seg_x) > 1:
                 ax.plot(seg_x, seg_y, **kwargs)
